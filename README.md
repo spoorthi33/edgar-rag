@@ -5,8 +5,8 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 0 (scaffolding).** Interfaces and project structure are in place; pipeline
-> implementation begins at Phase 1. See [Roadmap](#roadmap).
+> **Status: Phase 1 (ingestion).** Filings download from EDGAR into the object store with rate
+> limiting, retries, and a resumable manifest. Parsing begins at Phase 2. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -90,12 +90,22 @@ docker compose up -d db     # PostgreSQL on :5432
 pytest
 ```
 
+### Ingesting filings
+
+```bash
+python scripts/ingest.py --tickers AAPL MSFT NVDA AMZN GOOGL --limit 4
+```
+
+Downloads the most recent filings per ticker into `data/raw/` and records them in
+`data/manifest.json`. Re-running is safe and cheap: filings are immutable once accepted, so
+anything already present is skipped rather than re-fetched.
+
 ## Roadmap
 
 | Phase | Scope | Done when |
 |---|---|---|
 | 0 (done) | Scaffolding — layout, config, interfaces, Docker | Tests pass; `docker compose up -d db` starts Postgres |
-| 1 | Ingestion — rate-limited EDGAR client, download, manifest | 20 filings stored, re-runnable without re-downloading |
+| 1 (done) | Ingestion — rate-limited EDGAR client, download, manifest | 20 filings stored, re-runnable without re-downloading |
 | 2 | Parsing — HTML→text, Item boundary detection | Can print Item 1A of a real 10-K, correctly bounded |
 | 3 | Chunking — semantic split within sections, provenance tags | Correct company/year/item tags, no mid-sentence cuts |
 | 4 | Embedding + FAISS index | "supply chain risk" returns sensible paragraphs |
@@ -116,6 +126,12 @@ unevaluated 10,000-filing one, and debugging chunking at scale is miserable.
   common cause of 403s.
 - Raw filings are stored on first download. Chunking strategy will change; re-downloading 10,000
   filings from a rate-limited government server should not have to.
+- **Fiscal years are not calendar years.** Apple's ends in September, NVIDIA's in January,
+  Microsoft's in June, and a fiscal year is named for the calendar year it *ends* in — so a quarter
+  ending December 2025 is Apple's FY2026 Q1. Quarters are derived by distance from fiscal year end
+  rather than by counting months, because 52/53-week calendars drift period ends across month
+  boundaries (Apple's fiscal Q3 can end on July 1). Mislabelled years defeat the metadata filtering
+  that keeps answers on the right filing.
 
 ## License
 
