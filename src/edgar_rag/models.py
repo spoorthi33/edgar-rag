@@ -46,6 +46,9 @@ class Section(BaseModel):
     title: str
     text: str
     order: int
+    # 10-Qs reuse item numbers across parts: Part I Item 1 is the financial
+    # statements, Part II Item 1 is legal proceedings.
+    part: str | None = None
 
 
 class ChunkMetadata(BaseModel):
@@ -63,13 +66,24 @@ class ChunkMetadata(BaseModel):
     fiscal_year: int
     fiscal_period: str | None = None
     item: str | None = None
+    # 10-Qs reuse item numbers across parts, so the part is required to
+    # identify a section: Part I Item 1 is the financial statements, Part II
+    # Item 1 is legal proceedings.
+    part: str | None = None
     filing_date: date
     accession_number: str
 
     @property
+    def section_label(self) -> str:
+        """Item qualified by part where one applies, e.g. "II-1" or "7A"."""
+        if not self.item:
+            return "-"
+        return f"{self.part}-{self.item}" if self.part else self.item
+
+    @property
     def citation(self) -> str:
         """Citation token the LLM is instructed to emit, e.g. [320193:2023:7]."""
-        return f"{self.cik}:{self.fiscal_year}:{self.item or '-'}"
+        return f"{self.cik}:{self.fiscal_year}:{self.section_label}"
 
 
 class Chunk(BaseModel):
@@ -123,3 +137,4 @@ class SearchFilter(BaseModel):
     form_types: list[FormType] | None = None
     fiscal_years: list[int] | None = None
     items: list[str] | None = None
+    parts: list[str] | None = None

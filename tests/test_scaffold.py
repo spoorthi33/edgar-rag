@@ -48,6 +48,21 @@ def test_citation_handles_missing_item() -> None:
     assert _metadata(item=None).citation == "320193:2023:-"
 
 
+def test_part_qualifies_the_section_label() -> None:
+    """10-Qs reuse item numbers across parts, so the part must disambiguate."""
+    financials = _metadata(item="1", part="I")
+    legal = _metadata(item="1", part="II")
+
+    assert financials.section_label == "I-1"
+    assert legal.section_label == "II-1"
+    assert financials.citation != legal.citation
+
+
+def test_section_label_omits_part_when_absent() -> None:
+    """10-K item numbers are unique across parts, so no qualifier is needed."""
+    assert _metadata(item="7A", part=None).section_label == "7A"
+
+
 def test_chunk_carries_provenance() -> None:
     chunk = Chunk(
         chunk_id="c1",

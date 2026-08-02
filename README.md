@@ -5,8 +5,8 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 1 (ingestion).** Filings download from EDGAR into the object store with rate
-> limiting, retries, and a resumable manifest. Parsing begins at Phase 2. See [Roadmap](#roadmap).
+> **Status: Phase 2 (parsing).** Filings download from EDGAR and split into their Item sections
+> (Risk Factors, MD&A, Financial Statements). Chunking begins at Phase 3. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -100,13 +100,20 @@ Downloads the most recent filings per ticker into `data/raw/` and records them i
 `data/manifest.json`. Re-running is safe and cheap: filings are immutable once accepted, so
 anything already present is skipped rather than re-fetched.
 
+### Parsing filings into sections
+
+```bash
+python scripts/parse.py                          # section summary for every filing
+python scripts/parse.py --ticker AAPL --item 1A --show
+```
+
 ## Roadmap
 
 | Phase | Scope | Done when |
 |---|---|---|
 | 0 (done) | Scaffolding — layout, config, interfaces, Docker | Tests pass; `docker compose up -d db` starts Postgres |
 | 1 (done) | Ingestion — rate-limited EDGAR client, download, manifest | 20 filings stored, re-runnable without re-downloading |
-| 2 | Parsing — HTML→text, Item boundary detection | Can print Item 1A of a real 10-K, correctly bounded |
+| 2 (done) | Parsing — HTML→text, Item boundary detection | Can print Item 1A of a real 10-K, correctly bounded |
 | 3 | Chunking — semantic split within sections, provenance tags | Correct company/year/item tags, no mid-sentence cuts |
 | 4 | Embedding + FAISS index | "supply chain risk" returns sensible paragraphs |
 | 5 | Hybrid retrieval — BM25, RRF, metadata pre-filter | Hybrid measurably beats dense alone |
@@ -126,6 +133,12 @@ unevaluated 10,000-filing one, and debugging chunking at scale is miserable.
   common cause of 403s.
 - Raw filings are stored on first download. Chunking strategy will change; re-downloading 10,000
   filings from a rate-limited government server should not have to.
+- **Item headings are surrounded by decoys.** Every filing repeats its item labels in a table of
+  contents, in running page headers (Microsoft's 10-K carries a bare `Item 8` about forty times),
+  and in body cross-references. Filers also disagree on format: Amazon and Alphabet write
+  `Item 1A.Risk Factors` with no space, Microsoft uses all-caps split across nested inline tags.
+  Detection therefore requires a title, ends the contents block where item numbering restarts, and
+  breaks ties between repeats by section length.
 - **Fiscal years are not calendar years.** Apple's ends in September, NVIDIA's in January,
   Microsoft's in June, and a fiscal year is named for the calendar year it *ends* in — so a quarter
   ending December 2025 is Apple's FY2026 Q1. Quarters are derived by distance from fiscal year end
