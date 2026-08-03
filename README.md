@@ -5,9 +5,9 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 4 (vector index).** Filings download from EDGAR, split into Item sections, chunk
-> semantically, and are searchable by meaning with metadata filtering. Hybrid search begins at
-> Phase 5. See [Roadmap](#roadmap).
+> **Status: Phase 5 (hybrid retrieval).** Filings download from EDGAR, split into Item sections,
+> chunk semantically, and are searchable by both meaning and exact terms, fused with Reciprocal
+> Rank Fusion. Generation begins at Phase 6. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -125,9 +125,12 @@ embedding model's 512-token limit.
 python scripts/index.py build
 python scripts/index.py search "what are the risks from supply chain disruption?"
 python scripts/index.py search "revenue growth" --ticker AAPL --year 2025 --item 7
+python scripts/index.py search "mine safety disclosures" --compare   # dense vs sparse vs hybrid
 ```
 
 Building the 2,105-chunk index takes about 140s on CPU; queries return in well under a second.
+`--compare` runs all three retrieval modes side by side and shows which retriever found each
+result and at what rank, e.g. `(d2+s1)`.
 
 ## Roadmap
 
@@ -138,7 +141,7 @@ Building the 2,105-chunk index takes about 140s on CPU; queries return in well u
 | 2 (done) | Parsing — HTML→text, Item boundary detection | Can print Item 1A of a real 10-K, correctly bounded |
 | 3 (done) | Chunking — semantic split within sections, provenance tags | Correct company/year/item tags, no mid-sentence cuts |
 | 4 (done) | FAISS index over the embeddings | "supply chain risk" returns sensible paragraphs |
-| 5 | Hybrid retrieval — BM25, RRF, metadata pre-filter | Hybrid measurably beats dense alone |
+| 5 (done) | Hybrid retrieval — BM25, RRF, metadata pre-filter | Hybrid measurably beats dense alone |
 | 6 | Generation — prompting, citations, numeric grounding check | Answers with verifiable citations; fabricated figures flagged |
 | 7 | FastAPI + PostgreSQL schema | `curl` a question, get structured JSON |
 | 8 | Evaluation harness — Recall@k, Precision@k, MRR, faithfulness | A metrics table worth quoting |
@@ -155,6 +158,17 @@ unevaluated 10,000-filing one, and debugging chunking at scale is miserable.
   common cause of 403s.
 - Raw filings are stored on first download. Chunking strategy will change; re-downloading 10,000
   filings from a rate-limited government server should not have to.
+- **BM25 needs question words and `company` in its stopword list.** Users ask "how much did the
+  company spend on research and development"; without stopping the grammar, the query's content
+  terms are outweighed. `company` looks like a content word but is a filer fingerprint — Apple
+  writes "the Company" where others write "we" — so it pulls in one filer's chunks regardless of
+  topic. Adding both moved the passages containing "research and development expense" from absent
+  from the top 20 into the top 3.
+- **RRF's published `k=60` was wrong here.** It weights top ranks gently, favouring chunks both
+  retrievers found. "Mine safety disclosures" is BM25's rank-1 hit and absent from dense results
+  entirely, and at `k=60` it fell out of the fused top 5. At `k=5` a rank-1 exclusive hit outweighs
+  deep agreement. Measured on a 12-query probe: dense 11/12, sparse 12/12, hybrid 12/12 at `k=5`
+  versus 11/12 at `k=60`. Phase 8's labelled set should confirm this on more than 12 queries.
 - **Token counts must come from the model's tokenizer, not a character estimate.** Filings are
   dense with dollar figures, percentages and tickers that fragment into far more tokens than prose.
   A characters÷4 estimate measured between 0.64x and 1.81x the true count, which put a fifth of the

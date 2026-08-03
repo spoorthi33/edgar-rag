@@ -147,6 +147,23 @@ def test_retries_on_429(settings) -> None:
     assert calls["n"] == 2
 
 
+def test_retry_count_comes_from_settings(settings) -> None:
+    """Against an endpoint that always fails, stop after the configured tries."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503)
+
+    settings = settings.model_copy(update={"edgar_max_retries": 2})
+    edgar = EdgarClient(
+        settings=settings, client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    with pytest.raises(EdgarError):
+        edgar.ticker_map()
+    assert calls["n"] == 2
+
+
 # --- Ticker resolution ---------------------------------------------------
 
 

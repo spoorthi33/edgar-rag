@@ -69,7 +69,13 @@ class Settings(BaseSettings):
     faiss_ivf_nlist: int = 256
     retrieval_top_k: int = 5
     retrieval_candidate_k: int = 20  # per-retriever depth before RRF fusion
-    rrf_k: int = 60
+    # RRF's published default is 60, which weights the top ranks gently and so
+    # favours chunks both retrievers found. That loses answers only one of them
+    # can see: "mine safety disclosures" is BM25's top hit and absent from dense
+    # results entirely, and at k=60 it fell out of the fused top 5. A smaller k
+    # lets a rank-1 exclusive hit outweigh a mid-ranked consensus pair.
+    # Measured on a 12-query probe; Phase 8's labelled set should confirm it.
+    rrf_k: int = 5
 
     # --- Generation ----------------------------------------------------
     llm_provider: LLMProvider = LLMProvider.ANTHROPIC

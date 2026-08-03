@@ -76,13 +76,17 @@ class EdgarClient:
 
     # --- HTTP ----------------------------------------------------------
 
-    @retry(
-        retry=retry_if_exception_type((RetryableStatus, httpx.TransportError)),
-        wait=wait_exponential(multiplier=5, min=5, max=60),
-        stop=stop_after_attempt(5),
-        reraise=True,
-    )
     def _get(self, url: str) -> httpx.Response:
+        """Fetch `url`, retrying transient failures with exponential backoff."""
+        retrying = retry(
+            retry=retry_if_exception_type((RetryableStatus, httpx.TransportError)),
+            wait=wait_exponential(multiplier=5, min=5, max=60),
+            stop=stop_after_attempt(self.settings.edgar_max_retries),
+            reraise=True,
+        )
+        return retrying(self._get_once)(url)
+
+    def _get_once(self, url: str) -> httpx.Response:
         self.limiter.acquire()
         response = self._client.get(url)
         if response.status_code in RETRY_STATUS:

@@ -26,6 +26,7 @@ import faiss
 import numpy as np
 
 from edgar_rag.index.base import VectorIndex
+from edgar_rag.index.metadata import MetadataFilterIndex
 from edgar_rag.models import Chunk, RetrievedChunk, SearchFilter
 
 logger = logging.getLogger(__name__)
@@ -36,22 +37,6 @@ MANIFEST_FILENAME = "index.json"
 
 # Below this, IVF has too few vectors per cluster to train usefully.
 MIN_VECTORS_FOR_IVF = 1000
-
-# SearchFilter field -> the ChunkMetadata attribute it constrains. Values are
-# normalised to strings so tickers can match case-insensitively and years can
-# be given as either int or str.
-FILTERABLE_FIELDS = {
-    "ciks": "cik",
-    "tickers": "ticker",
-    "form_types": "form_type",
-    "fiscal_years": "fiscal_year",
-    "items": "item",
-    "parts": "part",
-}
-
-
-def _key(value: object) -> str:
-    return str(value).upper() if value is not None else ""
 
 
 class FaissIndex(VectorIndex):
@@ -75,11 +60,7 @@ class FaissIndex(VectorIndex):
         self.model_name = model_name
         self._index: faiss.Index | None = None
         self._chunks: list[Chunk] = []
-        # Inverted maps from metadata value to row id. Built as chunks are
-        # added so a filtered query intersects small id sets instead of
-        # scanning the corpus: the scan cost 80ms at 200k chunks and grows
-        # linearly, on the path every filtered query takes.
-        self._by_field: dict[str, dict[str, set[int]]] = {field: {} for field in FILTERABLE_FIELDS}
+        self._filters = MetadataFilterIndex()
 
     # --- Building ------------------------------------------------------
 
@@ -106,13 +87,7 @@ class FaissIndex(VectorIndex):
         first_id = len(self._chunks)
         self._index.add(vectors)
         self._chunks.extend(chunks)
-        self._index_metadata(chunks, first_id)
-
-    def _index_metadata(self, chunks: list[Chunk], first_id: int) -> None:
-        for offset, chunk in enumerate(chunks):
-            for field, attribute in FILTERABLE_FIELDS.items():
-                key = _key(getattr(chunk.metadata, attribute))
-                self._by_field[field].setdefault(key, set()).add(first_id + offset)
+        self._filters.add(chunks, first_id)
 
     def _should_upgrade_to_ivf(self, incoming: int) -> bool:
         """True when IVF was requested but an earlier small batch forced flat."""
@@ -200,34 +175,20 @@ class FaissIndex(VectorIndex):
         return faiss.SearchParameters(sel=selector)
 
     def _allowed_ids(self, filters: SearchFilter | None) -> np.ndarray | None:
-        """Row ids matching the metadata filter, or None when unfiltered.
-
-        Each criterion contributes the union of its values' id sets, and the
-        criteria intersect. Cost scales with the number of matching chunks
-        rather than the size of the corpus.
-        """
-        if filters is None:
-            return None
-
-        matching: set[int] | None = None
-        for field, values in filters.model_dump().items():
-            if not values or field not in self._by_field:
-                continue
-            index = self._by_field[field]
-            candidates: set[int] = set()
-            for value in values:
-                candidates |= index.get(_key(value), set())
-            matching = candidates if matching is None else matching & candidates
-            if not matching:
-                break
-
-        if matching is None:  # no criteria set
+        """Row ids matching the metadata filter, or None when unfiltered."""
+        matching = self._filters.allowed(filters)
+        if matching is None:
             return None
         return np.fromiter(sorted(matching), dtype=np.int64, count=len(matching))
 
     @property
     def size(self) -> int:
         return len(self._chunks)
+
+    @property
+    def chunks(self) -> list[Chunk]:
+        """Indexed chunks, so the sparse retriever can index the same set."""
+        return self._chunks
 
     # --- Persistence ---------------------------------------------------
 
@@ -287,7 +248,6 @@ class FaissIndex(VectorIndex):
         with (path / CHUNKS_FILENAME).open() as handle:
             self._chunks = [Chunk.model_validate_json(line) for line in handle if line.strip()]
 
-        self._by_field = {field: {} for field in FILTERABLE_FIELDS}
-        self._index_metadata(self._chunks, first_id=0)
+        self._filters.rebuild(self._chunks)
 
         logger.info("loaded %d vectors from %s", self.size, path)
