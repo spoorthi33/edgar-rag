@@ -5,8 +5,9 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 3 (chunking).** Filings download from EDGAR, split into Item sections, and chunk
-> semantically with full provenance. Indexing begins at Phase 4. See [Roadmap](#roadmap).
+> **Status: Phase 4 (vector index).** Filings download from EDGAR, split into Item sections, chunk
+> semantically, and are searchable by meaning with metadata filtering. Hybrid search begins at
+> Phase 5. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -118,6 +119,16 @@ python scripts/chunk.py --stats --fixed          # skip embeddings, deterministi
 The 20-filing corpus yields about 2,100 chunks with a median of 461 tokens, none exceeding the
 embedding model's 512-token limit.
 
+### Indexing and search
+
+```bash
+python scripts/index.py build
+python scripts/index.py search "what are the risks from supply chain disruption?"
+python scripts/index.py search "revenue growth" --ticker AAPL --year 2025 --item 7
+```
+
+Building the 2,105-chunk index takes about 140s on CPU; queries return in well under a second.
+
 ## Roadmap
 
 | Phase | Scope | Done when |
@@ -126,7 +137,7 @@ embedding model's 512-token limit.
 | 1 (done) | Ingestion — rate-limited EDGAR client, download, manifest | 20 filings stored, re-runnable without re-downloading |
 | 2 (done) | Parsing — HTML→text, Item boundary detection | Can print Item 1A of a real 10-K, correctly bounded |
 | 3 (done) | Chunking — semantic split within sections, provenance tags | Correct company/year/item tags, no mid-sentence cuts |
-| 4 | FAISS index over the embeddings | "supply chain risk" returns sensible paragraphs |
+| 4 (done) | FAISS index over the embeddings | "supply chain risk" returns sensible paragraphs |
 | 5 | Hybrid retrieval — BM25, RRF, metadata pre-filter | Hybrid measurably beats dense alone |
 | 6 | Generation — prompting, citations, numeric grounding check | Answers with verifiable citations; fabricated figures flagged |
 | 7 | FastAPI + PostgreSQL schema | `curl` a question, get structured JSON |
