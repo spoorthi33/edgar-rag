@@ -18,8 +18,9 @@ from collections.abc import Sequence
 
 from edgar_rag.models import RetrievedChunk
 
-# Smaller than RRF's published default of 60: see config.rrf_k for why.
-DEFAULT_RRF_K = 5
+# Smaller than RRF's published default of 60: see config.rrf_k for the
+# measured sweep behind this value.
+DEFAULT_RRF_K = 10
 
 
 def reciprocal_rank_fusion(

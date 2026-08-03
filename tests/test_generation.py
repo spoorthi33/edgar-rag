@@ -106,6 +106,20 @@ def test_unknown_model_costs_zero_rather_than_guessing() -> None:
     assert estimate_cost("some-future-model", 1_000_000, 1_000_000) == 0.0
 
 
+def test_dated_model_ids_are_priced() -> None:
+    """The API returns `claude-haiku-4-5-20251001` for a `claude-haiku-4-5`
+    request. Exact-match lookup priced every such call at zero, which
+    exempted the model from the spend ceiling rather than merely
+    misreporting it."""
+    assert estimate_cost("claude-haiku-4-5-20251001", 1_000_000, 0) == pytest.approx(1.00)
+    assert estimate_cost("claude-sonnet-5-20260101", 1_000_000, 0) == pytest.approx(2.00)
+
+
+def test_prefix_match_prefers_the_longest_key() -> None:
+    """A shorter key must not shadow a more specific one."""
+    assert estimate_cost("claude-opus-5", 1_000_000, 0) == pytest.approx(5.00)
+
+
 def test_cached_calls_do_not_count_against_the_ceiling() -> None:
     budget = Budget(max_calls=2)
     for _ in range(50):
@@ -362,6 +376,25 @@ def test_trailing_zeros_do_not_cause_a_false_flag() -> None:
 def test_digits_inside_citations_are_not_treated_as_figures() -> None:
     chunks = [_retrieved("Some text with no figures at all.")]
     assert find_ungrounded_figures("The risk is described [0000320193:2025:I-1A].", chunks) == []
+
+
+def test_fiscal_years_are_not_treated_as_figures() -> None:
+    """ "Q1 FY2026" is a period the model states, not a quoted figure. Checking
+    them flagged answers that were otherwise entirely grounded."""
+    chunks = [_retrieved("Revenue for the quarter ended December 27, 2025 was $124 billion.")]
+    assert find_ungrounded_figures("For Q1 FY2026, revenue was $124 billion.", chunks) == []
+
+
+def test_scale_restatement_is_not_a_second_figure() -> None:
+    """Filings tabulate in millions; answers often restate in billions."""
+    chunks = [_retrieved("Repurchases totalled 62,184 for the year.")]
+    answer = "Alphabet repurchased $62,184 million ($62.184 billion) of stock."
+    assert find_ungrounded_figures(answer, chunks) == []
+
+
+def test_a_genuinely_invented_figure_still_fails_after_the_year_exemption() -> None:
+    chunks = [_retrieved("Revenue was $124 billion in the period.")]
+    assert find_ungrounded_figures("Revenue was $999 billion.", chunks) == ["999"]
 
 
 def test_small_integers_are_not_flagged() -> None:

@@ -132,13 +132,31 @@ class CumulativeSpend:
         )
 
 
+def _rates_for(model: str) -> tuple[float, float] | None:
+    """Look up pricing, tolerating the dated ids the API returns.
+
+    A request for `claude-haiku-4-5` comes back as
+    `claude-haiku-4-5-20251001`. Matching only on the exact string priced
+    every one of those calls at zero, which does not merely misreport cost
+    — it exempts the model from the spend ceiling entirely.
+    """
+    if model in PRICING:
+        return PRICING[model]
+
+    # Longest first, so `claude-opus-4-8` is not matched by a shorter key.
+    for known in sorted(PRICING, key=len, reverse=True):
+        if model.startswith(known):
+            return PRICING[known]
+    return None
+
+
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Cost in USD for one call. Unknown models are priced at zero.
 
     An unknown model is logged rather than guessed at: a wrong price is
     worse than a missing one, because it makes the ceiling meaningless.
     """
-    rates = PRICING.get(model)
+    rates = _rates_for(model)
     if rates is None:
         logger.warning("no pricing for %s; cost not tracked for this call", model)
         return 0.0

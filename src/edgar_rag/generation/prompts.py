@@ -58,8 +58,20 @@ def build_prompt(question: str, chunks: list[RetrievedChunk]) -> str:
 
 
 def build_judge_prompt(question: str, answer: str, chunks: list[RetrievedChunk]) -> str:
-    """Prompt for the faithfulness judge used by the evaluation harness."""
-    context = "\n\n".join(f"[{r.chunk.metadata.citation}] {r.chunk.text}" for r in chunks)
+    """Prompt for the faithfulness judge used by the evaluation harness.
+
+    Passages carry the company name and period, not just the citation tag.
+    Given bare `[cik:year:item]` tags the judge could not tell which filer a
+    passage came from, and marked correct answers unsupported for
+    "attributing disclosures to Apple" when the context named no company —
+    a failure of this prompt rather than of the answer.
+    """
+    context = "\n\n".join(
+        f"[{r.chunk.metadata.citation}] {r.chunk.metadata.company_name} "
+        f"{r.chunk.metadata.form_type.value} FY{r.chunk.metadata.fiscal_year}\n"
+        f"{r.chunk.text}"
+        for r in chunks
+    )
     return (
         "Decide whether the answer is fully supported by the context.\n\n"
         f"Context:\n{context}\n\n"

@@ -5,9 +5,9 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 7 (service layer).** A FastAPI service answers questions over HTTP with citations
-> and grounding verdicts, persisting every query to PostgreSQL. Evaluation follows at Phase 8.
-> See [Roadmap](#roadmap).
+> **Status: Phase 8 (measured).** Retrieval and answer quality are measured against a 52-question
+> labelled set rather than asserted. Hybrid retrieval reaches **Hit@5 = 1.00**; every unanswerable
+> question is correctly declined. See [Results](#results).
 
 ## Why
 
@@ -143,6 +143,19 @@ python scripts/ask.py "..." --show-context --no-cache
 Needs `ANTHROPIC_API_KEY`. Roughly $0.006-0.011 per answer on Claude Sonnet 5; repeated questions
 are served from disk at no cost.
 
+### Evaluating
+
+```bash
+python scripts/evaluate.py --validate                    # check labels, free
+python scripts/evaluate.py --compare --retrieval-only    # all 3 modes, free, ~11s
+python scripts/evaluate.py --mode hybrid                 # full judged run, ~$0.58
+```
+
+Relevance is expressed as a predicate over chunk text and metadata, resolved against the corpus at
+run time, so labels survive a change to chunking — a hand-listed chunk id would go stale exactly
+when the metrics matter most. `--validate` reports any rule that matches nothing, since a broken
+label would otherwise depress recall and misdirect the next fix.
+
 ### Running the service
 
 ```bash
@@ -165,6 +178,46 @@ curl -X POST localhost:8000/query -H 'content-type: application/json' \
 The index and embedding model load once at startup (~11s), so query latency is about 1s rather
 than paying the load cost per request. Interactive docs at `/docs`.
 
+## Results
+
+Measured on 52 labelled questions (44 answerable, 8 deliberately unanswerable) over the 20-filing
+corpus, `k=5`:
+
+| Retrieval | Hit@5 | Recall@5* | Precision@5 | MRR | Faithfulness |
+|---|---|---|---|---|---|
+| Dense only | 0.841 | 0.602 | 0.600 | 0.746 | — |
+| Sparse only (BM25) | 0.909 | 0.782 | 0.755 | 0.868 | — |
+| **Hybrid (RRF)** | **1.000** | 0.768 | 0.745 | 0.864 | **0.962** |
+
+\* `achievable_recall@5`. Raw Recall@k is bounded by `k/|relevant|`, so a question with 100 relevant
+chunks scores 0.05 even under perfect retrieval; dividing by `min(k, |relevant|)` asks the
+answerable question instead — of the slots available, how many held evidence.
+
+**Hybrid retrieves relevant evidence for every answerable question**, where dense alone misses 16%
+and sparse misses 9%. Sparse edges hybrid on precision and MRR, so the gain is specifically in
+*coverage*: the questions dense and sparse each miss are different ones, and fusing them leaves no
+gap. This is the claim Phase 5 could only assert on a 12-query probe.
+
+Answer quality on hybrid retrieval: **96.2% faithful** (LLM-judged), **98.1% of answers contain no
+figure absent from the retrieved passages**, and **100% of unanswerable questions were correctly
+declined** — the model does not fall back on training knowledge when the filings are silent. Two of
+52 questions fail.
+
+**The measurement needed fixing before the numbers meant anything.** Hand-checking the judge's
+verdicts found errors in both directions: the numeric check flagged fiscal years the model derived
+("Q1 FY2026") and scale restatements ("$62,184 million ($62.184 billion)") as invented figures,
+while the judge marked correct answers unsupported for "attributing disclosures to Apple" because
+the judge prompt showed only `[cik:year:item]` tags and never named the company. Fixing both moved
+faithfulness from 0.885 to 0.962 — the system did not change, the measurement did. A judge trusted
+without validation is not evidence.
+
+The `rrf_k` fusion constant was also re-tuned against this set: the Phase 5 value of 5 came from a
+12-query probe, and a sweep over all 44 answerable questions showed `k=10` matches it on coverage
+while scoring better on recall and MRR (`k=60`, RRF's published default, drops Hit@5 to 0.932).
+
+A full judged run costs about **$0.58**; re-runs after a retrieval change cost only what changed,
+and `--retrieval-only` scores retrieval with no API calls at all (11s for all three modes).
+
 ## Roadmap
 
 | Phase | Scope | Done when |
@@ -177,7 +230,7 @@ than paying the load cost per request. Interactive docs at `/docs`.
 | 5 (done) | Hybrid retrieval — BM25, RRF, metadata pre-filter | Hybrid measurably beats dense alone |
 | 6 (done) | Generation — prompting, citations, numeric grounding check | Answers with verifiable citations; fabricated figures flagged |
 | 7 (done) | FastAPI + PostgreSQL schema | `curl` a question, get structured JSON |
-| 8 | Evaluation harness — Recall@k, Precision@k, MRR, faithfulness | A metrics table worth quoting |
+| 8 (done) | Evaluation harness — Recall@k, Precision@k, MRR, faithfulness | A metrics table worth quoting |
 | 9 | Scale to 10K+ documents, switch to IVF | Corpus target met; p95 latency measured |
 | 10 | Packaging and deployment | Runs from a clean machine |
 

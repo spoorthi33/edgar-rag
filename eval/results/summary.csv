@@ -1,0 +1,2 @@
+mode,top_k,questions,answerable,recall@5,achievable_recall@5,precision@5,mrr,hit@5,faithfulness,numeric_grounding,correct_declines,quoted_expected,median_latency_ms,cost_usd,elapsed_s
+hybrid,5,52,44,0.20453209509677783,0.7681818181818183,0.7454545454545454,0.8640151515151515,1.0,0.9615384615384616,0.9807692307692307,1.0,,3557.8976039541885,0.644298,280.7070767079713

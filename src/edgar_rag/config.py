@@ -72,10 +72,16 @@ class Settings(BaseSettings):
     # RRF's published default is 60, which weights the top ranks gently and so
     # favours chunks both retrievers found. That loses answers only one of them
     # can see: "mine safety disclosures" is BM25's top hit and absent from dense
-    # results entirely, and at k=60 it fell out of the fused top 5. A smaller k
-    # lets a rank-1 exclusive hit outweigh a mid-ranked consensus pair.
-    # Measured on a 12-query probe; Phase 8's labelled set should confirm it.
-    rrf_k: int = 5
+    # results entirely, and at k=60 it fell out of the fused top 5.
+    #
+    # Swept over the 44 answerable labelled questions (Phase 8):
+    #   k=60  Hit@5 0.932  recall 0.758  MRR 0.849
+    #   k=5   Hit@5 1.000  recall 0.755  MRR 0.852
+    #   k=10  Hit@5 1.000  recall 0.768  MRR 0.864  <- chosen
+    # The Phase 5 value of 5 came from a 12-query probe and was slightly
+    # overtuned; 10 matches it on coverage and is better on both other
+    # metrics at no extra cost.
+    rrf_k: int = 10
 
     # --- Generation ----------------------------------------------------
     llm_provider: LLMProvider = LLMProvider.ANTHROPIC
@@ -108,7 +114,10 @@ class Settings(BaseSettings):
     eval_dataset_path: Path = PROJECT_ROOT / "eval" / "questions.jsonl"
     # The judge shares `llm_cache_path` with generation; a second cache
     # directory would half-miss on every evaluation re-run.
-    eval_judge_model: str = "claude-sonnet-5"
+    # The judge decides whether text supports text — a verification task,
+    # not a reasoning-heavy one — and runs on every question of every
+    # re-run, so it uses the cheapest capable model.
+    eval_judge_model: str = "claude-haiku-4-5"
 
 
 @lru_cache

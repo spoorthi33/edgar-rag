@@ -5,6 +5,11 @@ docs/LEARNING_NOTES.md
 .env
 .env.local
 
+# Per-question evaluation output goes stale on every change; summary.csv
+# is the headline table and is kept.
+eval/results/results_*.csv
+eval/results_*/
+
 # Data, indexes, model caches
 data/
 *.faiss
