@@ -89,6 +89,48 @@ class Budget:
             f"${self.cost_usd:.4f}"
         )
 
+    def reset(self) -> None:
+        """Clear the counters, keeping the ceilings.
+
+        A long-lived service needs the loop guard per request, not per
+        process: sharing one budget across every request turns a ceiling
+        meant to stop a runaway loop into a permanent outage once enough
+        legitimate requests have been served.
+        """
+        with self._lock:
+            self.calls = 0
+            self.cached_calls = 0
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.cost_usd = 0.0
+
+
+@dataclass
+class CumulativeSpend:
+    """Running totals across a process, for reporting rather than limiting."""
+
+    calls: int = 0
+    cached_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def absorb(self, budget: Budget) -> None:
+        with self._lock:
+            self.calls += budget.calls
+            self.cached_calls += budget.cached_calls
+            self.input_tokens += budget.input_tokens
+            self.output_tokens += budget.output_tokens
+            self.cost_usd += budget.cost_usd
+
+    def summary(self) -> str:
+        return (
+            f"{self.calls} calls ({self.cached_calls} cached), "
+            f"{self.input_tokens:,} in / {self.output_tokens:,} out, "
+            f"${self.cost_usd:.4f}"
+        )
+
 
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Cost in USD for one call. Unknown models are priced at zero.

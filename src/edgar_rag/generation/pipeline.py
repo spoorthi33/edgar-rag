@@ -93,4 +93,7 @@ class AnswerPipeline:
             ungrounded_figures=ungrounded,
             model=response.model,
             latency_ms=(time.perf_counter() - started) * 1000,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            truncated=response.truncated,
         )

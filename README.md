@@ -5,9 +5,9 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 6 (grounded generation).** The system answers questions with citations, declines
-> when the filings do not support an answer, and verifies every figure against the retrieved text.
-> A service layer follows at Phase 7. See [Roadmap](#roadmap).
+> **Status: Phase 7 (service layer).** A FastAPI service answers questions over HTTP with citations
+> and grounding verdicts, persisting every query to PostgreSQL. Evaluation follows at Phase 8.
+> See [Roadmap](#roadmap).
 
 ## Why
 
@@ -143,6 +143,28 @@ python scripts/ask.py "..." --show-context --no-cache
 Needs `ANTHROPIC_API_KEY`. Roughly $0.006-0.011 per answer on Claude Sonnet 5; repeated questions
 are served from disk at no cost.
 
+### Running the service
+
+```bash
+docker compose up -d db
+uvicorn edgar_rag.api.main:app --reload
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /query` | Ask a question; returns answer, citations, and grounding verdict |
+| `GET /health` | Index size, database reachability, active model |
+| `GET /queries` | Recent queries with their grounding verdicts |
+| `GET /stats` | How often answers were fully traceable to retrieved passages |
+
+```bash
+curl -X POST localhost:8000/query -H 'content-type: application/json' \
+  -d '{"question":"How much did Apple spend on R&D?","tickers":["AAPL"]}'
+```
+
+The index and embedding model load once at startup (~11s), so query latency is about 1s rather
+than paying the load cost per request. Interactive docs at `/docs`.
+
 ## Roadmap
 
 | Phase | Scope | Done when |
@@ -154,7 +176,7 @@ are served from disk at no cost.
 | 4 (done) | FAISS index over the embeddings | "supply chain risk" returns sensible paragraphs |
 | 5 (done) | Hybrid retrieval — BM25, RRF, metadata pre-filter | Hybrid measurably beats dense alone |
 | 6 (done) | Generation — prompting, citations, numeric grounding check | Answers with verifiable citations; fabricated figures flagged |
-| 7 | FastAPI + PostgreSQL schema | `curl` a question, get structured JSON |
+| 7 (done) | FastAPI + PostgreSQL schema | `curl` a question, get structured JSON |
 | 8 | Evaluation harness — Recall@k, Precision@k, MRR, faithfulness | A metrics table worth quoting |
 | 9 | Scale to 10K+ documents, switch to IVF | Corpus target met; p95 latency measured |
 | 10 | Packaging and deployment | Runs from a clean machine |

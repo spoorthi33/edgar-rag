@@ -15,5 +15,4 @@ COPY . .
 
 EXPOSE 8000
 
-# Replaced with the real app in Phase 7.
-CMD ["python", "-c", "import edgar_rag; print(f'edgar-rag {edgar_rag.__version__} ready')"]
+CMD ["uvicorn", "edgar_rag.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

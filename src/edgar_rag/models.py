@@ -122,6 +122,11 @@ class Answer(BaseModel):
     ungrounded_figures: list[str] = Field(default_factory=list)
     model: str | None = None
     latency_ms: float | None = None
+    # Carried through so the cost of a query is recoverable from the
+    # database rather than only from logs.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    truncated: bool = False
 
     @property
     def is_grounded(self) -> bool:
