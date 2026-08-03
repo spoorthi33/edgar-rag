@@ -5,8 +5,8 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 2 (parsing).** Filings download from EDGAR and split into their Item sections
-> (Risk Factors, MD&A, Financial Statements). Chunking begins at Phase 3. See [Roadmap](#roadmap).
+> **Status: Phase 3 (chunking).** Filings download from EDGAR, split into Item sections, and chunk
+> semantically with full provenance. Indexing begins at Phase 4. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -107,6 +107,17 @@ python scripts/parse.py                          # section summary for every fil
 python scripts/parse.py --ticker AAPL --item 1A --show
 ```
 
+### Chunking
+
+```bash
+python scripts/chunk.py --stats                  # corpus-wide chunk statistics
+python scripts/chunk.py --ticker AAPL --item 1A --show 3
+python scripts/chunk.py --stats --fixed          # skip embeddings, deterministic
+```
+
+The 20-filing corpus yields about 2,100 chunks with a median of 461 tokens, none exceeding the
+embedding model's 512-token limit.
+
 ## Roadmap
 
 | Phase | Scope | Done when |
@@ -114,8 +125,8 @@ python scripts/parse.py --ticker AAPL --item 1A --show
 | 0 (done) | Scaffolding — layout, config, interfaces, Docker | Tests pass; `docker compose up -d db` starts Postgres |
 | 1 (done) | Ingestion — rate-limited EDGAR client, download, manifest | 20 filings stored, re-runnable without re-downloading |
 | 2 (done) | Parsing — HTML→text, Item boundary detection | Can print Item 1A of a real 10-K, correctly bounded |
-| 3 | Chunking — semantic split within sections, provenance tags | Correct company/year/item tags, no mid-sentence cuts |
-| 4 | Embedding + FAISS index | "supply chain risk" returns sensible paragraphs |
+| 3 (done) | Chunking — semantic split within sections, provenance tags | Correct company/year/item tags, no mid-sentence cuts |
+| 4 | FAISS index over the embeddings | "supply chain risk" returns sensible paragraphs |
 | 5 | Hybrid retrieval — BM25, RRF, metadata pre-filter | Hybrid measurably beats dense alone |
 | 6 | Generation — prompting, citations, numeric grounding check | Answers with verifiable citations; fabricated figures flagged |
 | 7 | FastAPI + PostgreSQL schema | `curl` a question, get structured JSON |
@@ -133,6 +144,11 @@ unevaluated 10,000-filing one, and debugging chunking at scale is miserable.
   common cause of 403s.
 - Raw filings are stored on first download. Chunking strategy will change; re-downloading 10,000
   filings from a rate-limited government server should not have to.
+- **Token counts must come from the model's tokenizer, not a character estimate.** Filings are
+  dense with dollar figures, percentages and tickers that fragment into far more tokens than prose.
+  A characters÷4 estimate measured between 0.64x and 1.81x the true count, which put a fifth of the
+  corpus over the embedding model's 512-token limit — where the overflow is discarded silently and
+  becomes unretrievable.
 - **Item headings are surrounded by decoys.** Every filing repeats its item labels in a table of
   contents, in running page headers (Microsoft's 10-K carries a bare `Item 8` about forty times),
   and in body cross-references. Filers also disagree on format: Amazon and Alphabet write

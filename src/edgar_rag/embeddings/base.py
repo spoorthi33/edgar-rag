@@ -32,3 +32,18 @@ class Embedder(ABC):
     @abstractmethod
     def embed_query(self, text: str) -> np.ndarray:
         """Embed a single user question. Returns shape (dimension,)."""
+
+    @property
+    @abstractmethod
+    def max_tokens(self) -> int:
+        """Longest input the model accepts before it truncates."""
+
+    @abstractmethod
+    def count_tokens(self, text: str) -> int:
+        """Token count as the model itself measures it.
+
+        Chunking must size against this rather than a character estimate:
+        filings are dense with figures and tickers that fragment into far
+        more tokens than prose, and anything past `max_tokens` is discarded
+        silently at embedding time.
+        """
