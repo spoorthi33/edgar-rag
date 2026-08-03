@@ -83,8 +83,19 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-5"
     openai_model: str = "gpt-4o-mini"
-    llm_max_tokens: int = 1024
+    # Answers are a short paragraph with citations. Output tokens cost five
+    # times input, so a loose ceiling here is where spend accumulates.
+    llm_max_tokens: int = 512
     llm_temperature: float = 0.0
+
+    # --- Spend guards --------------------------------------------------
+    # Generation and the evaluation judge are the only paid calls in this
+    # system. The risk is a retry loop rather than any single call, so each
+    # run aborts once it crosses either ceiling.
+    max_api_calls_per_run: int = 200
+    max_cost_usd_per_run: float = 5.00
+    llm_cache_enabled: bool = True
+    llm_cache_path: Path = PROJECT_ROOT / "data" / "llm_cache"
 
     # --- Database ------------------------------------------------------
     database_url: str = "postgresql+psycopg://edgar:edgar@localhost:5432/edgar_rag"
@@ -95,7 +106,8 @@ class Settings(BaseSettings):
 
     # --- Eval ----------------------------------------------------------
     eval_dataset_path: Path = PROJECT_ROOT / "eval" / "questions.jsonl"
-    eval_cache_path: Path = PROJECT_ROOT / "data" / ".llm_cache"
+    # The judge shares `llm_cache_path` with generation; a second cache
+    # directory would half-miss on every evaluation re-run.
     eval_judge_model: str = "claude-sonnet-5"
 
 

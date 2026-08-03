@@ -18,6 +18,10 @@ class LLMResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached: bool = False
+    # True when the model hit the output cap. A truncated answer otherwise
+    # reaches the caller looking complete — mid-sentence, and with any
+    # citation or figure after the cut-off silently missing.
+    truncated: bool = False
 
 
 class LLMClient(ABC):

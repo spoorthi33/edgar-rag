@@ -5,9 +5,9 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 5 (hybrid retrieval).** Filings download from EDGAR, split into Item sections,
-> chunk semantically, and are searchable by both meaning and exact terms, fused with Reciprocal
-> Rank Fusion. Generation begins at Phase 6. See [Roadmap](#roadmap).
+> **Status: Phase 6 (grounded generation).** The system answers questions with citations, declines
+> when the filings do not support an answer, and verifies every figure against the retrieved text.
+> A service layer follows at Phase 7. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -132,6 +132,17 @@ Building the 2,105-chunk index takes about 140s on CPU; queries return in well u
 `--compare` runs all three retrieval modes side by side and shows which retriever found each
 result and at what rank, e.g. `(d2+s1)`.
 
+### Asking questions
+
+```bash
+python scripts/ask.py "How much did Apple spend on research and development?" --ticker AAPL
+python scripts/ask.py "What supply chain risks does Apple disclose?" --ticker AAPL --item 1A
+python scripts/ask.py "..." --show-context --no-cache
+```
+
+Needs `ANTHROPIC_API_KEY`. Roughly $0.006-0.011 per answer on Claude Sonnet 5; repeated questions
+are served from disk at no cost.
+
 ## Roadmap
 
 | Phase | Scope | Done when |
@@ -142,7 +153,7 @@ result and at what rank, e.g. `(d2+s1)`.
 | 3 (done) | Chunking — semantic split within sections, provenance tags | Correct company/year/item tags, no mid-sentence cuts |
 | 4 (done) | FAISS index over the embeddings | "supply chain risk" returns sensible paragraphs |
 | 5 (done) | Hybrid retrieval — BM25, RRF, metadata pre-filter | Hybrid measurably beats dense alone |
-| 6 | Generation — prompting, citations, numeric grounding check | Answers with verifiable citations; fabricated figures flagged |
+| 6 (done) | Generation — prompting, citations, numeric grounding check | Answers with verifiable citations; fabricated figures flagged |
 | 7 | FastAPI + PostgreSQL schema | `curl` a question, get structured JSON |
 | 8 | Evaluation harness — Recall@k, Precision@k, MRR, faithfulness | A metrics table worth quoting |
 | 9 | Scale to 10K+ documents, switch to IVF | Corpus target met; p95 latency measured |
