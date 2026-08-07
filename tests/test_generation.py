@@ -440,6 +440,46 @@ def test_declining_is_detected() -> None:
     assert not has_declined("Revenue was $383.3 billion.")
 
 
+def test_unclosed_citation_from_truncation_is_not_a_figure() -> None:
+    """A cut-off "[0001500412:2025:I" has no closing bracket, so the
+    citation pattern misses it and the CIK reaches the figure check."""
+    chunks = [_retrieved("Some risk factor text with no figures.")]
+    answer = "Suppliers may stop selling to us [0001500412:2025:I"
+
+    assert find_ungrounded_figures(answer, chunks) == []
+
+
+def test_dates_are_not_treated_as_figures() -> None:
+    chunks = [_retrieved("A plan was adopted during the period.")]
+
+    assert find_ungrounded_figures("The plan was adopted 12/18/2025.", chunks) == []
+    assert find_ungrounded_figures("Adopted on March 15, 2026.", chunks) == []
+    assert find_ungrounded_figures("Effective 2025-10-31.", chunks) == []
+
+
+def test_digits_inside_a_name_are_not_figures() -> None:
+    """A 1,800-filer corpus contains names like "Data443 Risk Mitigation"."""
+    chunks = [_retrieved("A company operating in risk mitigation.")]
+
+    assert find_ungrounded_figures("Data443 Risk Mitigation provides tools.", chunks) == []
+
+
+def test_a_figure_mashed_against_letters_in_a_filing_still_counts_as_evidence() -> None:
+    """Table extraction runs cells together, so this is how real figures
+    appear in filings. Requiring clean boundaries on the evidence side made
+    four grounded answers look invented."""
+    chunks = [_retrieved("Three Months Ended June 28, 2025AmericasEurope Net sales$41,198 total")]
+
+    assert find_ungrounded_figures("Net sales were $41,198 million.", chunks) == []
+
+
+def test_a_real_invented_figure_still_survives_the_new_filters() -> None:
+    """The filters must not be so broad that they hide actual failures."""
+    chunks = [_retrieved("Research and development expense was $29.9 billion.")]
+
+    assert find_ungrounded_figures("R&D was $31.4 billion.", chunks) == ["31.4"]
+
+
 # --- Pipeline ------------------------------------------------------------
 
 
@@ -459,6 +499,23 @@ def test_answer_carries_citations_and_passages() -> None:
     assert len(answer.citations) == 1
     assert answer.retrieved == chunks
     assert answer.is_grounded
+
+
+def test_truncated_answer_skips_the_figure_check() -> None:
+    """Its trailing text is cut mid-claim, so it is not a claim to verify."""
+
+    class TruncatingLLM(StubLLM):
+        def complete(self, prompt, system=None, max_tokens=None, temperature=None):
+            return LLMResponse(
+                text="Net sales were $999.9 billion [0000320193:2025:I",
+                model=self.model,
+                truncated=True,
+            )
+
+    answer = _pipeline(TruncatingLLM(), [_retrieved("Net sales were $383.3 billion.")]).answer("q")
+
+    assert answer.truncated is True
+    assert answer.ungrounded_figures == []
 
 
 def test_answer_flags_an_invented_figure() -> None:

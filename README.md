@@ -5,9 +5,10 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 8 (measured).** Retrieval and answer quality are measured against a 52-question
-> labelled set rather than asserted. Hybrid retrieval reaches **Hit@5 = 1.00**; every unanswerable
-> question is correctly declined. See [Results](#results).
+> **Status: Phase 9 (scale).** Retrieval and answer quality are measured against a 52-question
+> labelled set rather than asserted — hybrid retrieval reaches **Hit@5 = 1.00** and every
+> unanswerable question is correctly declined ([Results](#results)). Memory per chunk is now ~10x
+> lower so a large corpus fits in 8 GB, and the build checkpoints so an interrupted run resumes.
 
 ## Why
 
@@ -231,7 +232,7 @@ and `--retrieval-only` scores retrieval with no API calls at all (11s for all th
 | 6 (done) | Generation — prompting, citations, numeric grounding check | Answers with verifiable citations; fabricated figures flagged |
 | 7 (done) | FastAPI + PostgreSQL schema | `curl` a question, get structured JSON |
 | 8 (done) | Evaluation harness — Recall@k, Precision@k, MRR, faithfulness | A metrics table worth quoting |
-| 9 | Scale to 10K+ documents, switch to IVF | Corpus target met; p95 latency measured |
+| 9 (in progress) | Scale the corpus, switch to IVF | Memory per chunk cut ~10x; build checkpointed |
 | 10 | Packaging and deployment | Runs from a clean machine |
 
 Phase 8 lands before Phase 9 deliberately: a well-evaluated 20-filing system is worth more than an
@@ -266,6 +267,22 @@ unevaluated 10,000-filing one, and debugging chunking at scale is miserable.
   `Item 1A.Risk Factors` with no space, Microsoft uses all-caps split across nested inline tags.
   Detection therefore requires a title, ends the contents block where item numbering restarts, and
   breaks ties between repeats by section length.
+- **Memory per chunk is what limits corpus size, and object overhead dominates it.** Holding chunks
+  as pydantic models cost 5.1 KB each to store 1.9 KB of text, and `rank_bm25` added 15.7 KB more by
+  keeping a Python dict per document plus the tokenized corpus. Together that put 1M chunks at
+  ~13 GB on an 8 GB machine. Chunk text now lives on disk with interned metadata in parallel arrays
+  (0.44 KB/chunk), and BM25 is CSR-style numpy postings (5.6 KB/chunk) whose rankings match
+  `rank_bm25` exactly — verified to 3.3e-6 with zero rank changes.
+- **The peak allocation is what matters, not the steady state.** Materialising the tokenized corpus
+  and freeing it afterwards changed nothing: the peak is what exhausts memory, and CPython does not
+  return the arena to the OS. Both the postings build and the token load stream one document at a
+  time instead.
+- **A long build must checkpoint and report progress.** Chunking 1,800 filings takes hours and
+  originally logged nothing, so a run was indistinguishable from a stall and an interruption lost
+  everything. Chunks checkpoint on completion, embeddings every 2,000 rows, and both stages report a
+  measured rate. The checkpoint records the splitter, token budget, overlap, breakpoint percentile
+  and embedding model — change any of them and it rebuilds rather than silently mixing incompatible
+  chunks.
 - **Fiscal years are not calendar years.** Apple's ends in September, NVIDIA's in January,
   Microsoft's in June, and a fiscal year is named for the calendar year it *ends* in — so a quarter
   ending December 2025 is Apple's FY2026 Q1. Quarters are derived by distance from fiscal year end

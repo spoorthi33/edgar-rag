@@ -9,6 +9,7 @@ splitter is retuned, which is exactly when the metrics matter most.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -55,7 +56,7 @@ class EvalQuestion(BaseModel):
     answerable: bool = True
     category: str = "general"
 
-    def relevant_chunk_ids(self, chunks: list[Chunk]) -> set[str]:
+    def relevant_chunk_ids(self, chunks: Iterable[Chunk]) -> set[str]:
         if self.relevance is None:
             return set()
         return {chunk.chunk_id for chunk in chunks if self.relevance.matches(chunk)}
@@ -89,7 +90,25 @@ class EvalDataset(BaseModel):
         return [q for q in self.questions if not q.answerable]
 
 
-def validate_against_corpus(dataset: EvalDataset, chunks: list[Chunk]) -> dict[str, list[str]]:
+def resolve_relevance(dataset: EvalDataset, chunks: Iterable[Chunk]) -> dict[str, set[str]]:
+    """Relevant chunk ids per question, in a single pass over the corpus.
+
+    One pass rather than one per question: at a million chunks, scanning
+    the corpus 52 times would dominate the run.
+    """
+    matches: dict[str, set[str]] = {q.id: set() for q in dataset.questions}
+    rules = [(q.id, q.relevance) for q in dataset.questions if q.relevance is not None]
+
+    for chunk in chunks:
+        for question_id, rule in rules:
+            if rule.matches(chunk):
+                matches[question_id].add(chunk.chunk_id)
+    return matches
+
+
+def validate_against_corpus(
+    dataset: EvalDataset, relevance: dict[str, set[str]]
+) -> dict[str, list[str]]:
     """Find labels the corpus cannot support.
 
     A question marked answerable whose relevance rule matches nothing is a
@@ -99,7 +118,7 @@ def validate_against_corpus(dataset: EvalDataset, chunks: list[Chunk]) -> dict[s
     problems: dict[str, list[str]] = {"no_matching_chunks": [], "unanswerable_with_matches": []}
 
     for question in dataset.questions:
-        matches = question.relevant_chunk_ids(chunks)
+        matches = relevance.get(question.id, set())
         if question.answerable and question.relevance and not matches:
             problems["no_matching_chunks"].append(question.id)
         if not question.answerable and matches:

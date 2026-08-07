@@ -13,16 +13,18 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
-from rank_bm25 import BM25Okapi
-
+from edgar_rag.index.chunk_store import ChunkStore
 from edgar_rag.index.metadata import MetadataFilterIndex
 from edgar_rag.models import Chunk, RetrievedChunk, SearchFilter
+from edgar_rag.retrieval.postings import BM25Postings
 
 logger = logging.getLogger(__name__)
 
 TOKENS_FILENAME = "bm25_tokens.jsonl"
+POSTINGS_FILENAME = "bm25_postings.npz"
 
 # Tokens worth keeping from filing text: words, and figures with their
 # punctuation intact so "$383.3" and "8.1%" survive as single terms rather
@@ -69,8 +71,9 @@ class BM25Retriever:
 
     def __init__(self, chunks: list[Chunk] | None = None) -> None:
         self._chunks: list[Chunk] = []
+        self._store: ChunkStore | None = None
         self._filters = MetadataFilterIndex()
-        self._bm25: BM25Okapi | None = None
+        self._bm25: BM25Postings | None = None
         self._tokenized: list[list[str]] = []
         self._stale = False
         if chunks:
@@ -92,32 +95,43 @@ class BM25Retriever:
             for tokens in self._tokenized:
                 handle.write(json.dumps(tokens) + "\n")
 
-    def load(self, path: Path, chunks: list[Chunk]) -> None:
-        """Restore from `path`, pairing tokens with the index's chunks."""
+    def load(self, path: Path, store: ChunkStore) -> None:
+        """Restore from `path`, pairing tokens with the index's chunk store."""
         tokens_file = path / TOKENS_FILENAME
         if not tokens_file.is_file():
             logger.info("no saved BM25 tokens at %s; tokenizing from scratch", path)
-            self.add(chunks)
+            self._store = store
+            self._filters.add_from_store(store)
+            postings = BM25Postings()
+            postings.build(tokenize(chunk.text) for chunk in store.iter_chunks())
+            self._bm25 = postings
+            self._stale = False
             return
 
-        with tokens_file.open() as handle:
-            tokenized = [json.loads(line) for line in handle if line.strip()]
-
-        if len(tokenized) != len(chunks):
+        saved_count = sum(1 for line in tokens_file.open() if line.strip())
+        if saved_count != len(store):
             # The corpus changed since the tokens were written; trusting them
             # would pair scores with the wrong chunks.
             logger.warning(
                 "saved BM25 tokens cover %d chunks but the index has %d; rebuilding",
-                len(tokenized),
-                len(chunks),
+                saved_count,
+                len(store),
             )
-            self.add(chunks)
+            self._store = store
+            self._filters.add_from_store(store)
+            postings = BM25Postings()
+            postings.build(tokenize(chunk.text) for chunk in store.iter_chunks())
+            self._bm25 = postings
+            self._stale = False
             return
 
-        self._chunks = list(chunks)
-        self._tokenized = tokenized
-        self._filters.rebuild(self._chunks)
-        self._bm25 = BM25Okapi(self._tokenized)
+        self._store = store
+        self._filters.add_from_store(store)
+        # Streamed a line at a time: the tokenized corpus is the largest
+        # single allocation in this class and never needs to exist whole.
+        postings = BM25Postings()
+        postings.build(_stream_tokens(tokens_file))
+        self._bm25 = postings
         self._stale = False
 
     def add(self, chunks: list[Chunk], defer: bool = False) -> None:
@@ -139,11 +153,20 @@ class BM25Retriever:
         if not defer:
             self.finalize()
 
-    def finalize(self) -> None:
-        """Recompute term statistics after deferred adds."""
+    def finalize(self, release_tokens: bool = False) -> None:
+        """Recompute term statistics after deferred adds.
+
+        `release_tokens` frees the tokenized corpus once the postings are
+        built. It is only safe when the tokens will not be saved, since
+        `save()` writes them for reuse.
+        """
         if self._stale and self._tokenized:
-            self._bm25 = BM25Okapi(self._tokenized)
+            postings = BM25Postings()
+            postings.build(self._tokenized)
+            self._bm25 = postings
             self._stale = False
+        if release_tokens:
+            self._tokenized = []
 
     def search(
         self,
@@ -152,7 +175,7 @@ class BM25Retriever:
         filters: SearchFilter | None = None,
     ) -> list[RetrievedChunk]:
         """Return the `top_k` best lexical matches for `query`."""
-        if self._bm25 is None or not self._chunks:
+        if self._bm25 is None or not self.size:
             return []
 
         tokens = tokenize(query)
@@ -163,8 +186,8 @@ class BM25Retriever:
         if allowed is not None and not allowed:
             return []
 
-        scores = self._bm25.get_scores(tokens)
-        candidates = allowed if allowed is not None else range(len(self._chunks))
+        scores = self._bm25.scores(tokens)
+        candidates = allowed if allowed is not None else range(self.size)
 
         # A zero score means no query term appears; such a chunk is not a
         # match at all and would otherwise pad the results with noise that
@@ -177,7 +200,7 @@ class BM25Retriever:
 
         return [
             RetrievedChunk(
-                chunk=self._chunks[position],
+                chunk=self._chunk_at(position),
                 score=float(scores[position]),
                 sparse_rank=rank + 1,
             )
@@ -186,4 +209,18 @@ class BM25Retriever:
 
     @property
     def size(self) -> int:
-        return len(self._chunks)
+        return len(self._store) if self._store is not None else len(self._chunks)
+
+    def _chunk_at(self, position: int) -> Chunk:
+        """One chunk, from the store when loaded and the list when built."""
+        if self._store is not None:
+            return self._store.chunk(position)
+        return self._chunks[position]
+
+
+def _stream_tokens(path: Path) -> Iterator[list[str]]:
+    """Yield one document's tokens at a time from the saved corpus."""
+    with path.open() as handle:
+        for line in handle:
+            if line.strip():
+                yield json.loads(line)

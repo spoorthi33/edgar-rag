@@ -26,6 +26,7 @@ import faiss
 import numpy as np
 
 from edgar_rag.index.base import VectorIndex
+from edgar_rag.index.chunk_store import ChunkStore
 from edgar_rag.index.metadata import MetadataFilterIndex
 from edgar_rag.models import Chunk, RetrievedChunk, SearchFilter
 
@@ -59,7 +60,7 @@ class FaissIndex(VectorIndex):
         self.nprobe = nprobe
         self.model_name = model_name
         self._index: faiss.Index | None = None
-        self._chunks: list[Chunk] = []
+        self._store = ChunkStore()
         self._filters = MetadataFilterIndex()
 
     # --- Building ------------------------------------------------------
@@ -84,9 +85,9 @@ class FaissIndex(VectorIndex):
             # rebuild as IVF now that there are enough vectors to train on.
             self._rebuild_as_ivf(vectors)
 
-        first_id = len(self._chunks)
+        first_id = len(self._store)
         self._index.add(vectors)
-        self._chunks.extend(chunks)
+        self._store.add(chunks)
         self._filters.add(chunks, first_id)
 
     def _should_upgrade_to_ivf(self, incoming: int) -> bool:
@@ -94,7 +95,7 @@ class FaissIndex(VectorIndex):
         return (
             self._requested_type == "ivf"
             and self.index_type == "flat"
-            and len(self._chunks) + incoming >= MIN_VECTORS_FOR_IVF
+            and len(self._store) + incoming >= MIN_VECTORS_FOR_IVF
         )
 
     def _rebuild_as_ivf(self, incoming: np.ndarray) -> None:
@@ -103,7 +104,7 @@ class FaissIndex(VectorIndex):
         self.index_type = "ivf"
         self._index = self._build_index(np.vstack([existing, incoming]))
         self._index.add(np.ascontiguousarray(existing, dtype=np.float32))
-        logger.info("rebuilt index as IVF after reaching %d vectors", len(self._chunks))
+        logger.info("rebuilt index as IVF after reaching %d vectors", len(self._store))
 
     def _build_index(self, vectors: np.ndarray) -> faiss.Index:
         """Create the underlying index, training it first if IVF."""
@@ -138,7 +139,7 @@ class FaissIndex(VectorIndex):
         top_k: int,
         filters: SearchFilter | None = None,
     ) -> list[RetrievedChunk]:
-        if self._index is None or not self._chunks:
+        if self._index is None or not len(self._store):
             return []
 
         query = np.ascontiguousarray(query_vector, dtype=np.float32).reshape(1, -1)
@@ -147,7 +148,7 @@ class FaissIndex(VectorIndex):
             return []
 
         if allowed is None:
-            scores, ids = self._index.search(query, min(top_k, len(self._chunks)))
+            scores, ids = self._index.search(query, min(top_k, len(self._store)))
         else:
             # An ID selector keeps filtering inside FAISS, so the requested
             # top_k is filled from matching chunks rather than being thinned
@@ -162,7 +163,7 @@ class FaissIndex(VectorIndex):
                 continue
             results.append(
                 RetrievedChunk(
-                    chunk=self._chunks[int(chunk_id)],
+                    chunk=self._store.chunk(int(chunk_id)),
                     score=float(score),
                     dense_rank=rank + 1,
                 )
@@ -183,12 +184,16 @@ class FaissIndex(VectorIndex):
 
     @property
     def size(self) -> int:
-        return len(self._chunks)
+        return len(self._store)
 
     @property
-    def chunks(self) -> list[Chunk]:
-        """Indexed chunks, so the sparse retriever can index the same set."""
-        return self._chunks
+    def store(self) -> ChunkStore:
+        """Chunk metadata and text, shared with the sparse retriever.
+
+        A `ChunkStore` rather than a list: holding a million pydantic
+        `Chunk` objects cost 5.1 KB each against 0.44 KB here.
+        """
+        return self._store
 
     # --- Persistence ---------------------------------------------------
 
@@ -200,9 +205,7 @@ class FaissIndex(VectorIndex):
         path.mkdir(parents=True, exist_ok=True)
         faiss.write_index(self._index, str(path / INDEX_FILENAME))
 
-        with (path / CHUNKS_FILENAME).open("w") as handle:
-            for chunk in self._chunks:
-                handle.write(chunk.model_dump_json() + "\n")
+        self._store.save(path)
 
         (path / MANIFEST_FILENAME).write_text(
             json.dumps(
@@ -245,9 +248,8 @@ class FaissIndex(VectorIndex):
         if self.index_type == "ivf":
             self._index.nprobe = self.nprobe
 
-        with (path / CHUNKS_FILENAME).open() as handle:
-            self._chunks = [Chunk.model_validate_json(line) for line in handle if line.strip()]
-
-        self._filters.rebuild(self._chunks)
+        self._store = ChunkStore()
+        self._store.load(path)
+        self._filters.add_from_store(self._store)
 
         logger.info("loaded %d vectors from %s", self.size, path)

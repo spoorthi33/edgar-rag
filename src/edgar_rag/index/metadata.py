@@ -50,6 +50,19 @@ class MetadataFilterIndex:
         self._by_field = {field: {} for field in FILTERABLE_FIELDS}
         self.add(chunks)
 
+    def add_from_store(self, store, first_id: int = 0, count: int | None = None) -> None:
+        """Build from a `ChunkStore`, reading interned codes directly.
+
+        Materialising a `ChunkMetadata` per chunk purely to index it would
+        cost more than the store saves.
+        """
+        self._by_field = {field: {} for field in FILTERABLE_FIELDS}
+        total = count if count is not None else len(store)
+        for position in range(first_id, first_id + total):
+            for field, attribute in FILTERABLE_FIELDS.items():
+                key = normalise(store.field(attribute, position))
+                self._by_field[field].setdefault(key, set()).add(position)
+
     def allowed(self, filters: SearchFilter | None) -> set[int] | None:
         """Positions matching `filters`, or None when nothing is constrained.
 

@@ -10,6 +10,7 @@ from edgar_rag.eval.dataset import (
     EvalDataset,
     EvalQuestion,
     RelevanceRule,
+    resolve_relevance,
     validate_against_corpus,
 )
 from edgar_rag.eval.harness import EvalHarness, _quoted_all
@@ -148,7 +149,9 @@ def test_a_rule_matching_nothing_is_reported_as_a_broken_label() -> None:
             )
         ]
     )
-    problems = validate_against_corpus(dataset, [_chunk("a", "something else")])
+    problems = validate_against_corpus(
+        dataset, resolve_relevance(dataset, [_chunk("a", "something else")])
+    )
 
     assert problems["no_matching_chunks"] == ["q1"]
 
@@ -164,7 +167,9 @@ def test_unanswerable_question_with_matches_is_reported() -> None:
             )
         ]
     )
-    problems = validate_against_corpus(dataset, [_chunk("a", "goodwill")])
+    problems = validate_against_corpus(
+        dataset, resolve_relevance(dataset, [_chunk("a", "goodwill")])
+    )
 
     assert problems["unanswerable_with_matches"] == ["q1"]
 
@@ -173,7 +178,10 @@ def test_clean_labels_report_no_problems() -> None:
     dataset = EvalDataset(
         questions=[EvalQuestion(id="q1", question="?", relevance=RelevanceRule(must_contain=["x"]))]
     )
-    assert validate_against_corpus(dataset, [_chunk("a", "x marks it")]) == {}
+    assert (
+        validate_against_corpus(dataset, resolve_relevance(dataset, [_chunk("a", "x marks it")]))
+        == {}
+    )
 
 
 def test_dataset_round_trips_through_disk(tmp_path) -> None:
@@ -303,7 +311,7 @@ class StubPipeline:
 def test_retrieval_only_makes_no_generation_calls() -> None:
     """The tuning loop must be free, or it will not be run often enough."""
     pipeline = StubPipeline(_retrieved("a", "b"))
-    harness = EvalHarness(pipeline=pipeline, chunks=[_chunk("a", "goodwill")])
+    harness = EvalHarness(pipeline=pipeline, relevance={"q1": {"a"}})
     dataset = EvalDataset(
         questions=[
             EvalQuestion(id="q1", question="?", relevance=RelevanceRule(must_contain=["goodwill"]))
@@ -318,7 +326,7 @@ def test_retrieval_only_makes_no_generation_calls() -> None:
 
 def test_retrieval_only_reports_no_faithfulness() -> None:
     """A faithfulness score over empty answers would be a lie."""
-    harness = EvalHarness(pipeline=StubPipeline(_retrieved("a")), chunks=[_chunk("a")])
+    harness = EvalHarness(pipeline=StubPipeline(_retrieved("a")), relevance={})
     dataset = EvalDataset(questions=[EvalQuestion(id="q1", question="?")])
 
     summary = harness.run(dataset, retrieval_only=True).summary()
@@ -329,7 +337,7 @@ def test_retrieval_only_reports_no_faithfulness() -> None:
 
 def test_summary_excludes_unanswerable_from_retrieval_metrics() -> None:
     """They have no relevant chunk; scoring them would blame retrieval."""
-    harness = EvalHarness(pipeline=StubPipeline([]), chunks=[_chunk("a", "goodwill")])
+    harness = EvalHarness(pipeline=StubPipeline([]), relevance={"q1": {"a"}})
     dataset = EvalDataset(
         questions=[
             EvalQuestion(id="q1", question="?", relevance=RelevanceRule(must_contain=["goodwill"])),
@@ -345,14 +353,14 @@ def test_summary_excludes_unanswerable_from_retrieval_metrics() -> None:
 
 def test_quoted_expected_is_none_when_nothing_is_labelled() -> None:
     """An empty mean would read as total failure."""
-    harness = EvalHarness(pipeline=StubPipeline(_retrieved("a")), chunks=[_chunk("a")])
+    harness = EvalHarness(pipeline=StubPipeline(_retrieved("a")), relevance={})
     dataset = EvalDataset(questions=[EvalQuestion(id="q1", question="?")])
 
     assert harness.run(dataset, retrieval_only=True).summary()["quoted_expected"] is None
 
 
 def test_report_frame_has_a_row_per_question() -> None:
-    harness = EvalHarness(pipeline=StubPipeline(_retrieved("a")), chunks=[_chunk("a")])
+    harness = EvalHarness(pipeline=StubPipeline(_retrieved("a")), relevance={})
     dataset = EvalDataset(questions=[EvalQuestion(id=f"q{i}", question="?") for i in range(3)])
 
     frame = harness.run(dataset, retrieval_only=True).frame()

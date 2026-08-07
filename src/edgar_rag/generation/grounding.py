@@ -22,10 +22,37 @@ from edgar_rag.models import Citation, RetrievedChunk
 # sentence punctuation is left out of the literal — "FY2026, revenue" once
 # yielded the literal "2026," which then failed every digit check applied
 # to it.
+# Two patterns, deliberately asymmetric: strict about what counts as a
+# *claim*, permissive about what counts as *evidence*.
+#
+# In an answer, digits attached to letters belong to a name — a corpus of
+# 1,800 filers contains "Data443 Risk Mitigation", whose 443 was reported
+# as an invented figure. In a filing, the same shape is ordinary: table
+# extraction runs cells together, so "June 28, 2025AmericasEurope" is how a
+# real figure appears. Applying the strict pattern to the context stopped
+# it finding numbers that were genuinely there, and four correctly grounded
+# answers were then reported as unfaithful.
+CLAIM_PATTERN = re.compile(r"(?<![A-Za-z\d])\d+(?:,\d{3})*(?:\.\d+)?(?![A-Za-z])")
 NUMBER_PATTERN = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?")
 
 # Citation tags carry digits (CIK, year) that are not claims about figures.
 CITATION_PATTERN = re.compile(r"\[([^\]]+)\]")
+
+# A citation the model never finished, because the answer hit the output
+# cap mid-tag. The pattern above needs the closing bracket, so without this
+# a truncated "[0001500412:2025:I" spills its CIK into the figure check and
+# a correctly grounded answer is reported as having invented a number.
+UNCLOSED_CITATION_PATTERN = re.compile(r"\[[^\]]*$")
+
+# Dates are periods, not reported figures: "adopted 12/18/2025" would
+# otherwise contribute 12 and 18 as claims to verify.
+DATE_PATTERN = re.compile(
+    r"\d{1,2}/\d{1,2}/\d{2,4}"
+    r"|\d{4}-\d{2}-\d{2}"
+    r"|(?:January|February|March|April|May|June|July|August|September"
+    r"|October|November|December)\s+\d{1,2},?\s+\d{4}",
+    re.IGNORECASE,
+)
 
 # Small integers are usually prose ("the top 3 risks", "2 segments") rather
 # than reported figures, and flagging them buries the real findings. The
@@ -46,9 +73,16 @@ SCALE_FACTORS = (Decimal("1000"), Decimal("0.001"))
 
 
 def extract_numbers(text: str) -> list[str]:
-    """Numeric literals in `text`, excluding those inside citation tags."""
-    without_citations = CITATION_PATTERN.sub(" ", text)
-    return NUMBER_PATTERN.findall(without_citations)
+    """Numeric literals in `text` that are claims about figures.
+
+    Citation tags, unfinished citation tags, and dates are removed first —
+    each carries digits the model is not asserting as a quantity, and each
+    produced a false "invented figure" on the 1,823-filing corpus.
+    """
+    stripped = CITATION_PATTERN.sub(" ", text)
+    stripped = UNCLOSED_CITATION_PATTERN.sub(" ", stripped)
+    stripped = DATE_PATTERN.sub(" ", stripped)
+    return CLAIM_PATTERN.findall(stripped)
 
 
 def _to_decimal(literal: str) -> Decimal | None:

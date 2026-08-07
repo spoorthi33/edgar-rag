@@ -6,8 +6,10 @@ python scripts/ingest.py --tickers AAPL MSFT NVDA AMZN GOOGL --limit 4
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+from pathlib import Path
 
 from edgar_rag.ingest.pipeline import ingest
 from edgar_rag.models import FormType
@@ -18,6 +20,11 @@ DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"]
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ingest SEC EDGAR filings")
     parser.add_argument("--tickers", nargs="+", default=DEFAULT_TICKERS)
+    parser.add_argument(
+        "--tickers-file",
+        type=Path,
+        help="newline- or JSON-delimited ticker list, for large runs",
+    )
     parser.add_argument(
         "--limit", type=int, default=4, help="max filings per ticker (most recent first)"
     )
@@ -35,8 +42,14 @@ def main() -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
+    tickers = args.tickers
+    if args.tickers_file:
+        raw = args.tickers_file.read_text().strip()
+        tickers = json.loads(raw) if raw.startswith("[") else raw.split()
+        logging.info("loaded %d tickers from %s", len(tickers), args.tickers_file)
+
     report = ingest(
-        args.tickers,
+        tickers,
         form_types=[FormType(f) for f in args.forms],
         limit_per_ticker=args.limit,
     )

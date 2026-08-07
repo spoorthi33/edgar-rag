@@ -78,7 +78,11 @@ class AnswerPipeline:
         if response.truncated:
             logger.warning("answer for %r was truncated at the output cap", question)
 
-        ungrounded = find_ungrounded_figures(response.text, retrieved)
+        # A truncated answer is cut mid-sentence and often mid-citation, so
+        # its trailing text is not a claim the model finished making.
+        # Checking it reported invented figures that were really the digits
+        # of an unclosed citation tag.
+        ungrounded = [] if response.truncated else find_ungrounded_figures(response.text, retrieved)
         if ungrounded:
             logger.warning(
                 "answer contains figures absent from the retrieved passages: %s",

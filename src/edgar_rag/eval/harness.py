@@ -14,7 +14,7 @@ from edgar_rag.eval.judge import FaithfulnessVerdict, judge_answer
 from edgar_rag.eval.metrics import RetrievalMetrics, mean
 from edgar_rag.generation.base import LLMClient
 from edgar_rag.generation.pipeline import AnswerPipeline
-from edgar_rag.models import Answer, Chunk
+from edgar_rag.models import Answer
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +129,12 @@ class EvalHarness:
     def __init__(
         self,
         pipeline: AnswerPipeline,
-        chunks: list[Chunk],
+        relevance: dict[str, set[str]],
         judge_llm: LLMClient | None = None,
         settings: Settings | None = None,
     ) -> None:
         self.pipeline = pipeline
-        self.chunks = chunks
+        self.relevance = relevance
         self.judge_llm = judge_llm
         self.settings = settings or get_settings()
 
@@ -191,7 +191,7 @@ class EvalHarness:
             )
         latency_ms = (time.perf_counter() - started) * 1000
 
-        relevant = question.relevant_chunk_ids(self.chunks)
+        relevant = self.relevance.get(question.id, set())
         retrieval = RetrievalMetrics.compute(answer.retrieved, relevant, top_k)
 
         faithfulness = judge_answer(

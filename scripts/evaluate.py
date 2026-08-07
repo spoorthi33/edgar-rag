@@ -17,7 +17,7 @@ import pandas as pd
 
 from edgar_rag.config import get_settings
 from edgar_rag.embeddings.sentence_transformer import SentenceTransformerEmbedder
-from edgar_rag.eval.dataset import EvalDataset, validate_against_corpus
+from edgar_rag.eval.dataset import EvalDataset, resolve_relevance, validate_against_corpus
 from edgar_rag.eval.harness import EvalHarness, EvalReport
 from edgar_rag.generation.anthropic_client import AnthropicClient
 from edgar_rag.generation.budget import BudgetExceeded
@@ -53,7 +53,8 @@ def main() -> int:
     embedder = SentenceTransformerEmbedder(settings=settings)
     index, sparse = load_retrievers(settings=settings, embedder=embedder)
 
-    problems = validate_against_corpus(dataset, index.chunks)
+    relevance = resolve_relevance(dataset, index.store.iter_chunks())
+    problems = validate_against_corpus(dataset, relevance)
     if problems:
         print("label problems (a rule matching nothing is a broken label, not a miss):")
         for kind, ids in problems.items():
@@ -81,7 +82,7 @@ def main() -> int:
             llm=get_llm_client(settings),
             settings=settings,
         ),
-        chunks=index.chunks,
+        relevance=relevance,
         judge_llm=judge,
         settings=settings,
     )

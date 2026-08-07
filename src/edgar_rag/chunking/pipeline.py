@@ -31,18 +31,7 @@ def chunk_section(
     if len(body) < MIN_CHUNK_CHARS:
         return []
 
-    metadata = ChunkMetadata(
-        cik=filing.cik,
-        ticker=filing.ticker,
-        company_name=filing.company_name,
-        form_type=filing.form_type,
-        fiscal_year=filing.fiscal_year,
-        fiscal_period=filing.fiscal_period,
-        item=section.item or None,
-        part=section.part,
-        filing_date=filing.filing_date,
-        accession_number=filing.accession_number,
-    )
+    metadata = _metadata_for(filing, section)
 
     chunks: list[Chunk] = []
     for order, text in enumerate(splitter.split(body)):
@@ -66,11 +55,59 @@ def chunk_filing(
     sections: list[Section],
     splitter: Splitter,
 ) -> list[Chunk]:
-    """Chunk every section of one filing."""
+    """Chunk every section of one filing.
+
+    All sections are split in one call so the semantic splitter can embed
+    their sentences as a single batch — per-section calls made the model
+    invocation overhead, not the arithmetic, the cost of a large build.
+    """
+    usable = [
+        (section, body)
+        for section in sections
+        if len(body := _strip_heading(section)) >= MIN_CHUNK_CHARS
+    ]
+    if not usable:
+        return []
+
+    split_texts = splitter.split_many([body for _, body in usable])
+
     chunks: list[Chunk] = []
-    for section in sections:
-        chunks.extend(chunk_section(filing, section, splitter))
+    for (section, _), texts in zip(usable, split_texts, strict=True):
+        chunks.extend(_build_chunks(filing, section, texts, splitter))
     return chunks
+
+
+def _build_chunks(
+    filing: Filing, section: Section, texts: list[str], splitter: Splitter
+) -> list[Chunk]:
+    metadata = _metadata_for(filing, section)
+    return [
+        Chunk(
+            chunk_id=_chunk_id(filing, section, order),
+            filing_id=filing.filing_id,
+            text=text,
+            metadata=metadata,
+            token_count=splitter.count_tokens(text),
+            order=order,
+        )
+        for order, text in enumerate(texts)
+        if len(text) >= MIN_CHUNK_CHARS
+    ]
+
+
+def _metadata_for(filing: Filing, section: Section) -> ChunkMetadata:
+    return ChunkMetadata(
+        cik=filing.cik,
+        ticker=filing.ticker,
+        company_name=filing.company_name,
+        form_type=filing.form_type,
+        fiscal_year=filing.fiscal_year,
+        fiscal_period=filing.fiscal_period,
+        item=section.item or None,
+        part=section.part,
+        filing_date=filing.filing_date,
+        accession_number=filing.accession_number,
+    )
 
 
 def _strip_heading(section: Section) -> str:

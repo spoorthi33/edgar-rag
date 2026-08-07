@@ -9,6 +9,7 @@ import pytest
 
 from edgar_rag.config import Settings
 from edgar_rag.embeddings.base import Embedder
+from edgar_rag.index.chunk_store import ChunkStore
 from edgar_rag.index.faiss_index import FaissIndex
 from edgar_rag.models import Chunk, ChunkMetadata, FormType, RetrievedChunk, SearchFilter
 from edgar_rag.retrieval.bm25 import BM25Retriever, tokenize
@@ -155,20 +156,29 @@ def test_deferred_adds_recompute_only_once(sparse: BM25Retriever) -> None:
 # --- Sparse persistence --------------------------------------------------
 
 
+def _store_of(chunks, tmp_path) -> ChunkStore:
+    store = ChunkStore()
+    store.add(chunks)
+    store.save(tmp_path)
+    return store
+
+
 def test_saved_tokens_are_reused(sparse: BM25Retriever, tmp_path) -> None:
     """Otherwise every query process re-tokenizes: ~46s at 500k chunks."""
     sparse.save(tmp_path)
+    store = _store_of(sparse._chunks, tmp_path)
 
     restored = BM25Retriever()
-    restored.load(tmp_path, sparse._chunks)
+    restored.load(tmp_path, store)
 
     assert restored.size == sparse.size
     assert restored.search("mine safety", top_k=1)[0].chunk.chunk_id == "a"
 
 
 def test_missing_token_file_falls_back_to_tokenizing(sparse: BM25Retriever, tmp_path) -> None:
+    store = _store_of(sparse._chunks, tmp_path)
     restored = BM25Retriever()
-    restored.load(tmp_path, sparse._chunks)  # nothing saved here
+    restored.load(tmp_path, store)  # no tokens saved here
     assert restored.search("mine safety", top_k=1)[0].chunk.chunk_id == "a"
 
 
@@ -176,9 +186,10 @@ def test_stale_token_file_is_discarded(sparse: BM25Retriever, tmp_path) -> None:
     """Pairing saved tokens with a changed corpus would score the wrong chunks."""
     sparse.save(tmp_path)
     grown = [*sparse._chunks, _chunk("z", "Newly ingested filing text about goodwill.")]
+    store = _store_of(grown, tmp_path / "grown")
 
     restored = BM25Retriever()
-    restored.load(tmp_path, grown)
+    restored.load(tmp_path, store)
 
     assert restored.size == len(grown)
     assert restored.search("goodwill", top_k=1)[0].chunk.chunk_id == "z"

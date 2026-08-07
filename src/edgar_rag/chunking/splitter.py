@@ -46,6 +46,15 @@ class Splitter(ABC):
     def split(self, text: str) -> list[str]:
         """Return the chunk texts for `text`, in document order."""
 
+    def split_many(self, texts: list[str]) -> list[list[str]]:
+        """Split several texts at once.
+
+        The default just loops; `SemanticSplitter` overrides it to embed
+        every text's sentences in one batch, which is the difference
+        between a few dozen sentences per model call and several thousand.
+        """
+        return [self.split(text) for text in texts]
+
     def count_tokens(self, text: str) -> int:
         """Token count under whichever counter this splitter was given."""
         return self._count_tokens(text)
@@ -128,9 +137,55 @@ class SemanticSplitter(Splitter):
             count_tokens=self._count_tokens,
         )
 
+    def split_many(self, texts: list[str]) -> list[list[str]]:
+        """Split several texts, embedding all their sentences in one call.
+
+        Embedding per text was the dominant cost of a large build: a
+        section yields a few dozen sentences, so the model was invoked
+        hundreds of thousands of times at a batch size far below what the
+        hardware wants, and per-call overhead swamped the actual work.
+        Batching across texts leaves the arithmetic identical — each text
+        still gets breakpoints from its own sentences — while turning
+        thousands of tiny calls into a handful of large ones.
+        """
+        per_text = [split_sentences(text) for text in texts]
+
+        # One flat batch, remembering where each text's sentences begin.
+        flat: list[str] = []
+        spans: list[tuple[int, int]] = []
+        for sentences in per_text:
+            start = len(flat)
+            if len(sentences) >= self.min_sentences:
+                flat.extend(sentences)
+            spans.append((start, len(flat)))
+
+        vectors = self.embedder.embed_documents(flat) if flat else None
+
+        results: list[list[str]] = []
+        for sentences, (start, end) in zip(per_text, spans, strict=True):
+            if not sentences:
+                results.append([])
+                continue
+            breakpoints = self._breakpoints_from(vectors[start:end]) if end > start else set()
+            results.append(
+                _pack(
+                    sentences,
+                    self.target_tokens,
+                    self.overlap_tokens,
+                    breakpoints,
+                    count_tokens=self._count_tokens,
+                )
+            )
+        return results
+
     def _find_breakpoints(self, sentences: list[str]) -> set[int]:
         """Indices after which the topic changes most sharply."""
-        vectors = self.embedder.embed_documents(sentences)
+        return self._breakpoints_from(self.embedder.embed_documents(sentences))
+
+    def _breakpoints_from(self, vectors: np.ndarray) -> set[int]:
+        """Breakpoints from already-computed sentence vectors."""
+        if len(vectors) < 2:
+            return set()
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         # A degenerate sentence can embed to the zero vector; avoid dividing
         # by zero rather than propagating NaNs into the percentile.
