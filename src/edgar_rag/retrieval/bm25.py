@@ -10,10 +10,8 @@ BM25 scores literal term overlap and recovers precisely those cases.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-from collections.abc import Iterator
 from pathlib import Path
 
 from edgar_rag.index.chunk_store import ChunkStore
@@ -23,7 +21,6 @@ from edgar_rag.retrieval.postings import BM25Postings
 
 logger = logging.getLogger(__name__)
 
-TOKENS_FILENAME = "bm25_tokens.jsonl"
 POSTINGS_FILENAME = "bm25_postings.npz"
 
 # Tokens worth keeping from filing text: words, and figures with their
@@ -82,55 +79,52 @@ class BM25Retriever:
     # --- Persistence ---------------------------------------------------
 
     def save(self, path: Path) -> None:
-        """Write the tokenized corpus next to the vector index.
+        """Write the built postings next to the vector index.
 
-        Every query process — each CLI call, and every service start in
-        Phase 7 — must have the term statistics before its first search.
-        Reading saved tokens measured 0.089s against 0.190s to tokenize from
-        scratch at 2,105 chunks: a little over twice as fast, and both scale
-        linearly, so the gap is tens of seconds at Phase 9's corpus size.
+        Every query process — each CLI call, and every service start —
+        needs term statistics before its first search. Saving the postings
+        rather than the tokenized corpus means loading is a few array reads
+        instead of re-tokenizing and re-counting 231k documents, which
+        measured 10.5s.
         """
+        if self._bm25 is None:
+            self.finalize()
+        if self._bm25 is None:
+            return
         path.mkdir(parents=True, exist_ok=True)
-        with (path / TOKENS_FILENAME).open("w") as handle:
-            for tokens in self._tokenized:
-                handle.write(json.dumps(tokens) + "\n")
+        self._bm25.save(path / POSTINGS_FILENAME)
 
     def load(self, path: Path, store: ChunkStore) -> None:
-        """Restore from `path`, pairing tokens with the index's chunk store."""
-        tokens_file = path / TOKENS_FILENAME
-        if not tokens_file.is_file():
-            logger.info("no saved BM25 tokens at %s; tokenizing from scratch", path)
-            self._store = store
-            self._filters.add_from_store(store)
-            postings = BM25Postings()
-            postings.build(tokenize(chunk.text) for chunk in store.iter_chunks())
-            self._bm25 = postings
-            self._stale = False
-            return
-
-        saved_count = sum(1 for line in tokens_file.open() if line.strip())
-        if saved_count != len(store):
-            # The corpus changed since the tokens were written; trusting them
-            # would pair scores with the wrong chunks.
-            logger.warning(
-                "saved BM25 tokens cover %d chunks but the index has %d; rebuilding",
-                saved_count,
-                len(store),
-            )
-            self._store = store
-            self._filters.add_from_store(store)
-            postings = BM25Postings()
-            postings.build(tokenize(chunk.text) for chunk in store.iter_chunks())
-            self._bm25 = postings
-            self._stale = False
-            return
-
+        """Restore from `path`, pairing postings with the index's chunk store."""
         self._store = store
         self._filters.add_from_store(store)
-        # Streamed a line at a time: the tokenized corpus is the largest
+
+        postings_file = path / POSTINGS_FILENAME
+        if postings_file.is_file():
+            postings = BM25Postings()
+            postings.load(postings_file)
+            if postings.size == len(store):
+                self._bm25 = postings
+                self._stale = False
+                return
+            # Saved postings that cover a different number of documents
+            # would score the wrong chunks: the row index is the chunk id.
+            logger.warning(
+                "saved BM25 postings cover %d chunks but the index has %d; rebuilding",
+                postings.size,
+                len(store),
+            )
+        else:
+            logger.info("no saved BM25 postings at %s; building from the store", path)
+
+        self._rebuild_from(store)
+
+    def _rebuild_from(self, store: ChunkStore) -> None:
+        """Tokenize the corpus and build postings, streaming a chunk at a time."""
+        # Streamed a chunk at a time: the tokenized corpus is the largest
         # single allocation in this class and never needs to exist whole.
         postings = BM25Postings()
-        postings.build(_stream_tokens(tokens_file))
+        postings.build(tokenize(chunk.text) for chunk in store.iter_chunks())
         self._bm25 = postings
         self._stale = False
 
@@ -156,9 +150,11 @@ class BM25Retriever:
     def finalize(self, release_tokens: bool = False) -> None:
         """Recompute term statistics after deferred adds.
 
-        `release_tokens` frees the tokenized corpus once the postings are
-        built. It is only safe when the tokens will not be saved, since
-        `save()` writes them for reuse.
+        `release_tokens` frees the tokenized corpus, but only the caller
+        knows whether more chunks are coming: BM25 statistics are
+        corpus-wide, so a later `add()` rebuilds from every token, and
+        dropping them mid-build would score the new chunks against an empty
+        corpus. The load path never populates them in the first place.
         """
         if self._stale and self._tokenized:
             postings = BM25Postings()
@@ -216,11 +212,3 @@ class BM25Retriever:
         if self._store is not None:
             return self._store.chunk(position)
         return self._chunks[position]
-
-
-def _stream_tokens(path: Path) -> Iterator[list[str]]:
-    """Yield one document's tokens at a time from the saved corpus."""
-    with path.open() as handle:
-        for line in handle:
-            if line.strip():
-                yield json.loads(line)
