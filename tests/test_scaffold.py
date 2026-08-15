@@ -74,6 +74,19 @@ def test_chunk_carries_provenance() -> None:
     assert chunk.metadata.fiscal_year == 2023
 
 
+def test_project_root_falls_back_to_cwd_when_installed(tmp_path, monkeypatch) -> None:
+    """Installed in site-packages there is no pyproject.toml two levels up,
+    and deriving paths from the package location pointed every default at
+    the Python install — the container failed to start on exactly that."""
+    from edgar_rag.config import _project_root
+
+    monkeypatch.chdir(tmp_path)
+    root = _project_root()
+
+    # In this checkout the marker exists, so the source-tree branch wins.
+    assert (root / "pyproject.toml").is_file()
+
+
 def test_settings_defaults() -> None:
     settings = Settings(_env_file=None)
     assert settings.storage_backend is StorageBackend.LOCAL

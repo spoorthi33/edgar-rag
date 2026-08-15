@@ -1,0 +1,14 @@
+# The corpus and index are mounted as a volume, not baked into the image:
+# 4.6 GB of build context would make every build minutes long and the image
+# unusable to ship.
+data/
+eval/results*/
+.venv/
+.git/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+.env
+docs/
+notebooks/

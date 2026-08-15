@@ -195,6 +195,19 @@ def test_truncation_survives_the_cache_round_trip(tmp_path) -> None:
     assert restored.truncated is True
 
 
+def test_unwritable_cache_does_not_fail_the_request(tmp_path) -> None:
+    """The cache is an optimisation. Deployed with the corpus mounted
+    read-only, an unwritable cache turned every miss into a 500."""
+    cache = ResponseCache(tmp_path)
+    tmp_path.chmod(0o500)  # readable and traversable, not writable
+    try:
+        cache.put("k", LLMResponse(text="answer", model="m"))  # must not raise
+    finally:
+        tmp_path.chmod(0o700)
+
+    assert cache.get("k") is None  # nothing stored, but nothing broken
+
+
 def test_cache_can_be_disabled(tmp_path) -> None:
     cache = ResponseCache(tmp_path, enabled=False)
     cache.put("k", LLMResponse(text="a", model="m"))

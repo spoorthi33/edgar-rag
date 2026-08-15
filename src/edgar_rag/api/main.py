@@ -25,7 +25,7 @@ from edgar_rag.api.schemas import (
 )
 from edgar_rag.config import Settings, get_settings
 from edgar_rag.db.repository import grounding_stats, recent_queries, record_answer
-from edgar_rag.db.session import create_tables, get_session_factory
+from edgar_rag.db.session import get_engine, get_session_factory
 from edgar_rag.embeddings.sentence_transformer import SentenceTransformerEmbedder
 from edgar_rag.generation.budget import BudgetExceeded, CumulativeSpend
 from edgar_rag.generation.pipeline import AnswerPipeline, get_llm_client
@@ -87,12 +87,31 @@ def build_state(settings: Settings | None = None) -> ServiceState:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Load the index once, and check the schema is migrated.
+
+    The service does not create tables. Alembic owns the schema, and
+    `create_all` alongside it would let a running instance invent a schema
+    that no migration describes — the two would then drift silently. The
+    container runs `alembic upgrade head` before starting uvicorn.
+    """
     global state
     settings = get_settings()
-    create_tables()
+    _warn_if_unmigrated()
     state = build_state(settings)
     yield
     state = None
+
+
+def _warn_if_unmigrated() -> None:
+    """Log clearly when the schema is missing, rather than failing per request."""
+    try:
+        with get_engine().connect() as connection:
+            connection.execute(text("SELECT 1 FROM queries LIMIT 1"))
+    except Exception:
+        logger.warning(
+            "queries table not found — run `alembic upgrade head` before serving; "
+            "answers will be returned but not recorded"
+        )
 
 
 app = FastAPI(

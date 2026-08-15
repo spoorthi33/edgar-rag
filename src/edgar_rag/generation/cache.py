@@ -89,23 +89,32 @@ class ResponseCache:
         )
 
     def put(self, key: str, response: LLMResponse) -> None:
+        """Store a response, treating any write failure as a cache miss.
+
+        The cache is an optimisation: a request that cannot write one must
+        still return its answer. Deployed with the index mounted read-only,
+        an unwritable cache turned every cache miss into a 500.
+        """
         if not self.enabled:
             return
         entry = self.path / f"{key}.json"
         tmp = entry.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "text": response.text,
-                    "model": response.model,
-                    "input_tokens": response.input_tokens,
-                    "output_tokens": response.output_tokens,
-                    "truncated": response.truncated,
-                },
-                indent=2,
+        try:
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "text": response.text,
+                        "model": response.model,
+                        "input_tokens": response.input_tokens,
+                        "output_tokens": response.output_tokens,
+                        "truncated": response.truncated,
+                    },
+                    indent=2,
+                )
             )
-        )
-        tmp.replace(entry)
+            tmp.replace(entry)
+        except OSError as exc:
+            logger.warning("could not write cache entry (%s); continuing", exc)
 
     def summary(self) -> str:
         total = self.hits + self.misses

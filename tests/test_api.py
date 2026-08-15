@@ -115,12 +115,13 @@ class StubPipeline:
 def client(db: Session, monkeypatch):
     """App wired to the SQLite session, with the heavy startup path stubbed.
 
-    Startup normally loads the embedding model and index and creates tables
-    against Postgres; the `db` fixture has already created them here, and
-    the real startup path is verified separately against a live database.
+    Startup normally loads the embedding model and index and checks the
+    schema against Postgres; the `db` fixture has already built it here,
+    and the real startup path is verified separately against a live
+    database and a real migration.
     """
     pipeline = StubPipeline()
-    monkeypatch.setattr(api_main, "create_tables", lambda *a, **k: None)
+    monkeypatch.setattr(api_main, "_warn_if_unmigrated", lambda: None)
     monkeypatch.setattr(
         api_main,
         "build_state",

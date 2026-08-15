@@ -5,10 +5,10 @@ Retrieval-augmented question answering over SEC EDGAR 10-K and 10-Q filings.
 Ask a question in natural language, get an answer grounded in — and cited back to — the exact
 passages it came from, with retrieval quality and answer faithfulness measured rather than assumed.
 
-> **Status: Phase 9 (scale).** Retrieval and answer quality are measured against a 52-question
-> labelled set rather than asserted — hybrid retrieval reaches **Hit@5 = 1.00** and every
-> unanswerable question is correctly declined ([Results](#results)). Memory per chunk is now ~10x
-> lower so a large corpus fits in 8 GB, and the build checkpoints so an interrupted run resumes.
+> **Status: complete.** 1,823 filings, 231,604 indexed chunks. Hybrid retrieval reaches
+> **Hit@5 = 0.909** with **100% faithfulness** and **100% correct declines**, all measured against a
+> 52-question labelled set rather than asserted ([Results](#results)). Runs from a clean machine
+> with `docker compose up`.
 
 ## Why
 
@@ -118,7 +118,7 @@ python scripts/chunk.py --stats --fixed          # skip embeddings, deterministi
 ```
 
 The 20-filing corpus yields about 2,100 chunks with a median of 461 tokens, none exceeding the
-embedding model's 512-token limit.
+embedding model's 512-token limit. The full 1,823-filing corpus yields 231,604.
 
 ### Indexing and search
 
@@ -129,7 +129,9 @@ python scripts/index.py search "revenue growth" --ticker AAPL --year 2025 --item
 python scripts/index.py search "mine safety disclosures" --compare   # dense vs sparse vs hybrid
 ```
 
-Building the 2,105-chunk index takes about 140s on CPU; queries return in well under a second.
+Building the 2,105-chunk index takes about 140s; the full 231,604-chunk build takes ~4.5 hours and
+checkpoints after chunking and every 2,000 embeddings, so an interrupted run resumes rather than
+restarting. Queries return in well under a second.
 `--compare` runs all three retrieval modes side by side and shows which retriever found each
 result and at what rank, e.g. `(d2+s1)`.
 
@@ -148,8 +150,8 @@ are served from disk at no cost.
 
 ```bash
 python scripts/evaluate.py --validate                    # check labels, free
-python scripts/evaluate.py --compare --retrieval-only    # all 3 modes, free, ~11s
-python scripts/evaluate.py --mode hybrid                 # full judged run, ~$0.58
+python scripts/evaluate.py --compare --retrieval-only    # all 3 modes, free, no API calls
+python scripts/evaluate.py --mode hybrid                 # full judged run, ~$0.63
 ```
 
 Relevance is expressed as a predicate over chunk text and metadata, resolved against the corpus at
@@ -159,8 +161,11 @@ label would otherwise depress recall and misdirect the next fix.
 
 ### Running the service
 
+Locally, against a Postgres container:
+
 ```bash
 docker compose up -d db
+alembic upgrade head          # Alembic owns the schema; the app never creates tables
 uvicorn edgar_rag.api.main:app --reload
 ```
 
@@ -181,8 +186,28 @@ than paying the load cost per request. Interactive docs at `/docs`.
 
 ## Results
 
-Measured on 52 labelled questions (44 answerable, 8 deliberately unanswerable) over the 20-filing
-corpus, `k=5`:
+Measured on 52 labelled questions (44 answerable, 8 deliberately unanswerable), `k=5`.
+
+### At scale — 1,823 filings, 231,604 chunks
+
+| | 20 filings (2,105 chunks) | 1,823 filings (231,604 chunks) | |
+|---|---|---|---|
+| Hit@5 (hybrid) | 1.000 | 0.909 | −0.091 |
+| MRR | 0.864 | **0.886** | **+0.022** |
+| Faithfulness | 0.962 | **1.000** | **+0.038** |
+| Correct declines | 1.000 | **1.000** | — |
+| Memory per chunk | 22.4 KB | **1.65 KB** | **13.6x** |
+| Corpus resident | 46 MB | **0.36 GB** | — |
+
+**A 110x larger corpus cost 9 points of Hit@5 and nothing else.** MRR improved — when hybrid finds
+the evidence it ranks it higher — and every unanswerable question was still declined.
+
+Sparse retrieval is what degrades: Hit@5 0.909 → 0.750, MRR 0.868 → 0.673. BM25 scores literal term
+overlap, and across 1,823 filers a term like "goodwill" appears in thousands of chunks from hundreds
+of companies, so lexical matching stops discriminating. Dense held up (0.841 → 0.864). **The two
+retrievers degrade differently, which is the argument for fusing them** rather than picking one.
+
+### On the 20-filing corpus
 
 | Retrieval | Hit@5 | Recall@5* | Precision@5 | MRR | Faithfulness |
 |---|---|---|---|---|---|
@@ -216,8 +241,61 @@ The `rrf_k` fusion constant was also re-tuned against this set: the Phase 5 valu
 12-query probe, and a sweep over all 44 answerable questions showed `k=10` matches it on coverage
 while scoring better on recall and MRR (`k=60`, RRF's published default, drops Hit@5 to 0.932).
 
-A full judged run costs about **$0.58**; re-runs after a retrieval change cost only what changed,
-and `--retrieval-only` scores retrieval with no API calls at all (11s for all three modes).
+A full judged run costs about **$0.63**; re-runs after a retrieval change cost only what changed,
+and `--retrieval-only` scores retrieval with no API calls at all.
+
+### Making the corpus fit
+
+10,000 filings is ~1.3M chunks. At the original 22.4 KB per chunk that is ~29 GB of RAM — not slow,
+impossible on an 8 GB machine. Almost none of it was the text (~1.9 KB per chunk); the rest was
+Python object overhead and `rank_bm25` keeping a dict per document.
+
+| | Before | After |
+|---|---|---|
+| Chunk storage (pydantic objects) | 5.08 KB | **0.44 KB** — text on disk, metadata interned in arrays |
+| BM25 | 15.7 KB | **1.15 KB** — CSR-style numpy postings |
+| **Total** | **22.4 KB** | **1.65 KB** |
+| Projected at 1.3M chunks | ~29 GB | **~2.1 GB** |
+
+Rankings were verified identical to `rank_bm25` before the swap: max score delta 3.3e-6, zero rank
+changes across ten probe queries. A memory win that silently changed results would be worse than
+the memory problem.
+
+## Deployment
+
+The whole stack runs from a clean checkout, provided `data/index/` has been built and `.env` holds
+an `ANTHROPIC_API_KEY`:
+
+```bash
+docker compose up -d          # Postgres + API, migrations applied automatically
+curl localhost:8000/health
+```
+
+The container runs `alembic upgrade head` before uvicorn starts, so the schema is always the one the
+migrations describe. The API process never creates tables: `create_all` alongside migrations lets a
+running instance invent a schema no migration accounts for, and the two then drift silently.
+
+| Choice | Why |
+|---|---|
+| `data/` mounted read-only | The index is ~830 MB. Baking it into the image would make every build minutes long, and the container only reads it. |
+| Response cache on its own writable volume | It must be writable and is worth persisting — a warm cache makes repeated questions free. Sharing the read-only mount turned every cache miss into a 500. |
+| Non-root user | The container needs no write access to its own code. |
+| CPU-only torch wheels | `pip install torch` pulls the CUDA build: 2.9 GB of `nvidia/` plus 652 MB of `triton/` that a CPU-only container downloads, stores, and never executes. Installing from PyTorch's CPU index took the image from **5.75 GB to 1.74 GB**. |
+| Healthcheck with a 90s start period | Loading the embedding model and 231k-chunk index takes time; a shorter grace period restarts a container that is merely still starting. |
+
+**Two bugs only the container found**, both invisible on the host:
+
+1. `PROJECT_ROOT` was derived from the package file's location, which is the repo root in a source
+   checkout but `site-packages` once pip-installed — so every data path pointed at the Python
+   install and the service died at startup. It now detects the layout via a marker file.
+2. The response cache lived under the read-only mount, so any cache miss raised `OSError` and
+   returned a 500. The cache is an optimisation and now degrades to a miss on write failure, and it
+   has its own volume.
+
+**Latency in Docker is materially worse than on the host** — roughly 9-23 s per answer against
+~3 s — because Docker on macOS has no GPU passthrough, so query embedding falls back to CPU. On a
+Linux host with native CPU, or with GPU access, this gap closes. Retrieval-only latency is 279 ms at
+231k chunks.
 
 ## Roadmap
 
@@ -232,8 +310,8 @@ and `--retrieval-only` scores retrieval with no API calls at all (11s for all th
 | 6 (done) | Generation — prompting, citations, numeric grounding check | Answers with verifiable citations; fabricated figures flagged |
 | 7 (done) | FastAPI + PostgreSQL schema | `curl` a question, get structured JSON |
 | 8 (done) | Evaluation harness — Recall@k, Precision@k, MRR, faithfulness | A metrics table worth quoting |
-| 9 (in progress) | Scale the corpus, switch to IVF | Memory per chunk cut ~10x; build checkpointed |
-| 10 | Packaging and deployment | Runs from a clean machine |
+| 9 (done) | Scale the corpus, switch to IVF | 231,604 chunks; memory per chunk cut 13.6x |
+| 10 (done) | Packaging and deployment | Runs from a clean machine |
 
 Phase 8 lands before Phase 9 deliberately: a well-evaluated 20-filing system is worth more than an
 unevaluated 10,000-filing one, and debugging chunking at scale is miserable.

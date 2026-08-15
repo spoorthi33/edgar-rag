@@ -14,7 +14,24 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def _project_root() -> Path:
+    """Where `data/` and `eval/` live, for both layouts this runs in.
+
+    From a source checkout the package sits at `<root>/src/edgar_rag`, so
+    walking up two directories finds the root. Once pip-installed it sits
+    in `site-packages`, where the same walk lands on the Python install and
+    every default path points at a directory that does not exist — the
+    container failed at startup on exactly that. The marker file tells the
+    two apart; installed, the working directory is the deployment root.
+    """
+    candidate = Path(__file__).resolve().parents[2]
+    if (candidate / "pyproject.toml").is_file():
+        return candidate
+    return Path.cwd()
+
+
+PROJECT_ROOT = _project_root()
 
 
 class StorageBackend(StrEnum):

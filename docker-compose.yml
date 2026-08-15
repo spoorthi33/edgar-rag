@@ -15,20 +15,28 @@ services:
       timeout: 5s
       retries: 5
 
-  # Enabled from Phase 7, once the FastAPI service exists.
   api:
-    profiles: ["api"]
     build: .
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://edgar:edgar@db:5432/edgar_rag
+      # The response cache must be writable, so it lives outside the
+      # read-only corpus mount. It is also worth persisting across restarts:
+      # a warm cache is what makes repeated questions free.
+      LLM_CACHE_PATH: /app/cache
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
+      # The index is built on the host and mounted read-only: it is ~830 MB
+      # and regenerating it inside the image would make every build hours
+      # long. The container only ever reads it.
+      - ./data:/app/data:ro
+      - llm_cache:/app/cache
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:
+  llm_cache:

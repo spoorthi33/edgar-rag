@@ -35,10 +35,13 @@ def get_session_factory(engine: Engine | None = None) -> sessionmaker[Session]:
 
 
 def create_tables(engine: Engine | None = None) -> None:
-    """Create any missing tables.
+    """Create any missing tables. **Tests only.**
 
-    Enough for development and tests; Alembic owns schema changes once the
-    database holds data worth migrating.
+    Alembic owns the schema. Calling this against a real database creates
+    tables no migration describes, and the two then drift silently — the
+    service deliberately does not call it, and the container runs
+    `alembic upgrade head` instead. It remains for the test suite, which
+    builds a throwaway SQLite database with no migration history.
     """
     Base.metadata.create_all(bind=engine or get_engine())
 
