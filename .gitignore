@@ -5,6 +5,9 @@ docs/LEARNING_NOTES.md
 .env
 .env.local
 
+# Local editor/tool settings
+.claude/
+
 # Per-question evaluation output goes stale on every change; summary.csv
 # is the headline table and is kept.
 eval/results/results_*.csv

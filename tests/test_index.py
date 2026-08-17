@@ -146,6 +146,72 @@ def test_small_first_batch_does_not_latch_the_index_to_flat() -> None:
     assert idx.search(vectors[0], 1)  # still searchable after the rebuild
 
 
+def test_retraining_recovers_recall_lost_to_appended_batches() -> None:
+    """Centroids fitted to one batch partition the whole corpus badly.
+
+    Growing the corpus in batches trains IVF on batch one, and every later
+    batch is filed against those centroids. Nothing errors -- the index
+    simply stops finding things, which is why the batch runner ends with a
+    reindex.
+
+    The first batch here is a tight cluster, so every centroid lands inside
+    a small region and the rest of the space is left to whichever of them
+    happens to be nearest. The loss shows up on queries drawn from the
+    whole corpus, which is what a real workload does.
+    """
+    chunks, _ = _random_corpus(6000, 32)
+    rng = np.random.default_rng(1)
+
+    first = rng.normal(scale=0.01, size=(3000, 32)).astype(np.float32)
+    first[:, 0] += 1.0
+    first /= np.linalg.norm(first, axis=1, keepdims=True)
+    second = rng.normal(size=(3000, 32)).astype(np.float32)
+    second /= np.linalg.norm(second, axis=1, keepdims=True)
+
+    index = FaissIndex(dimension=32, index_type="ivf", nlist=64)
+    index.add(chunks[:3000], first)
+    index.add(chunks[3000:], second)
+
+    everything = np.vstack([first, second])
+    exact = FaissIndex(dimension=32, index_type="flat")
+    exact.add(chunks, everything)
+
+    queries = everything[rng.choice(len(everything), 100, replace=False)]
+
+    def recall() -> float:
+        hits = 0
+        for query in queries:
+            want = {r.chunk.chunk_id for r in exact.search(query, 5)}
+            got = {r.chunk.chunk_id for r in index.search(query, 5)}
+            hits += len(want & got)
+        return hits / (5 * len(queries))
+
+    stale = recall()
+    assert index.retrain() is True
+    assert recall() > stale + 0.05
+
+
+def test_retraining_preserves_the_corpus() -> None:
+    chunks, vectors = _random_corpus(3000, 32)
+    index = FaissIndex(dimension=32, index_type="ivf", nlist=64)
+    index.add(chunks, vectors)
+
+    index.retrain()
+
+    assert index.size == 3000
+    assert index.search(vectors[0], 1)[0].chunk.chunk_id == "c0"
+
+
+def test_retraining_a_flat_index_does_nothing() -> None:
+    """Flat is exact, so it has no centroids to go stale."""
+    chunks, vectors = _random_corpus(100, 32)
+    index = FaissIndex(dimension=32, index_type="flat")
+    index.add(chunks, vectors)
+
+    assert index.retrain() is False
+    assert index.size == 100
+
+
 def test_filtering_cost_does_not_scale_with_the_corpus() -> None:
     """The filter must not scan every chunk: at 500k it would dominate latency."""
     chunks, vectors = _random_corpus(20000, 8)
@@ -275,6 +341,77 @@ def test_roundtrip_preserves_metadata(index: FaissIndex, tmp_path) -> None:
     meta = restored.search(_unit(1, 0, 0, 0), top_k=1)[0].chunk.metadata
     assert meta.ticker == "AAPL"
     assert meta.section_label == "I-1A"
+
+
+# --- Appending to a saved index ------------------------------------------
+#
+# Growing the corpus in batches loads an index and adds to it, which leaves
+# the chunk store half on disk and half in memory. Nothing exercised that
+# state until batching existed, and two separate bugs were hiding in it.
+
+
+def _reload(tmp_path) -> FaissIndex:
+    restored = FaissIndex(dimension=DIM, model_name="stub-model")
+    restored.load(tmp_path)
+    return restored
+
+
+def test_appending_to_a_loaded_index_keeps_the_original_text(index, tmp_path) -> None:
+    """Saving read chunk text from the very file it was truncating.
+
+    A fresh build holds all its text in memory, so the read never touched
+    the file and the bug stayed invisible until an index was loaded and
+    appended to -- at which point every previously saved chunk came back
+    empty.
+    """
+    index.save(tmp_path)
+    original = index.store.text(0)
+
+    restored = _reload(tmp_path)
+    restored.add([_chunk("e", ticker="TSLA", text="new chunk text")], _unit(1, 1, 0, 0)[None, :])
+    restored.save(tmp_path)
+
+    assert _reload(tmp_path).store.text(0) == original
+
+
+def test_appended_chunks_are_readable_before_and_after_saving(index, tmp_path) -> None:
+    """Text lookup must handle a store that is part on disk, part in memory."""
+    index.save(tmp_path)
+    restored = _reload(tmp_path)
+    restored.add([_chunk("e", ticker="TSLA", text="new chunk text")], _unit(1, 1, 0, 0)[None, :])
+
+    assert restored.store.text(4) == "new chunk text"  # still only in memory
+    restored.save(tmp_path)
+    assert _reload(tmp_path).store.text(4) == "new chunk text"
+
+
+def test_iterating_a_half_saved_store_yields_every_chunk(index, tmp_path) -> None:
+    """`iter_chunks` streams the text file, which knows nothing of additions.
+
+    BM25 rebuilds itself from this, so a chunk missed here is a chunk that
+    can never be found by lexical search.
+    """
+    index.save(tmp_path)
+    restored = _reload(tmp_path)
+    restored.add([_chunk("e", ticker="TSLA", text="new chunk text")], _unit(1, 1, 0, 0)[None, :])
+
+    streamed = list(restored.store.iter_chunks())
+
+    assert [c.chunk_id for c in streamed] == ["a", "b", "c", "d", "e"]
+    assert streamed[-1].text == "new chunk text"
+
+
+def test_repeated_appends_accumulate(index, tmp_path) -> None:
+    index.save(tmp_path)
+    for i, name in enumerate(["e", "f", "g"]):
+        restored = _reload(tmp_path)
+        restored.add([_chunk(name, text=f"text {name}")], _unit(1, 1, 0, 0)[None, :])
+        restored.save(tmp_path)
+        assert restored.size == 5 + i
+
+    final = _reload(tmp_path)
+    assert final.size == 7
+    assert [final.store.text(i) for i in range(4, 7)] == ["text e", "text f", "text g"]
 
 
 def test_saving_an_empty_index_is_rejected(tmp_path) -> None:

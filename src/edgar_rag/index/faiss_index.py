@@ -106,6 +106,28 @@ class FaissIndex(VectorIndex):
         self._index.add(np.ascontiguousarray(existing, dtype=np.float32))
         logger.info("rebuilt index as IVF after reaching %d vectors", len(self._store))
 
+    def retrain(self) -> bool:
+        """Retrain IVF centroids over every vector currently indexed.
+
+        IVF partitions the space using centroids fitted to whatever vectors
+        existed when it was trained. Chunks appended afterwards are filed
+        against those original centroids, so a corpus grown in batches ends
+        up clustered for its first batch alone — and the failure is silent,
+        costing recall rather than raising anything. Retraining once the
+        corpus is complete fits the centroids to all of it.
+
+        The vectors come back out of the index itself, so this costs no
+        re-embedding. Returns whether anything was retrained.
+        """
+        if self._index is None or self.index_type != "ivf":
+            return False
+
+        vectors = self._index.reconstruct_n(0, self._index.ntotal)
+        logger.info("retraining IVF centroids over %d vectors", len(vectors))
+        self._index = self._build_index(vectors)
+        self._index.add(np.ascontiguousarray(vectors, dtype=np.float32))
+        return True
+
     def _build_index(self, vectors: np.ndarray) -> faiss.Index:
         """Create the underlying index, training it first if IVF."""
         if self.index_type == "ivf":

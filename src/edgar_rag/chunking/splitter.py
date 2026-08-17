@@ -210,26 +210,53 @@ def _pack(
     half-full guard stops a run of topic shifts from producing chunks too
     small to carry context.
 
-    Joining with a space costs a token or two beyond the sum of the parts,
-    so the budget is checked against the joined text rather than a running
-    total; the difference is what pushes a chunk over a hard model limit.
+    The budget is checked against the joined text, not a running total:
+    tokenizing sentences separately counts each one's special tokens, and
+    that difference is what pushes a chunk over a hard model limit.
+
+    Measuring the joined text on every sentence is quadratic, though — a
+    40-sentence chunk re-tokenized 40 progressively longer strings, and
+    that alone was 42% of a full build. Summing the per-sentence counts is
+    an upper bound on the joined count (verified on the corpus: the joined
+    text is always at least 2 tokens shorter, being one pair of special
+    tokens rather than many), so while the bound stays under budget the
+    chunk provably does too and the exact count can be skipped. It is only
+    consulted once the bound crosses the limit, near a chunk boundary. Both
+    the decision and the resulting chunks are unchanged.
     """
     chunks: list[str] = []
     current: list[str] = []
+    sizes: list[int] = []
+    bound = 0
     half_budget = target_tokens // 2
 
     for index, sentence in enumerate(sentences):
-        candidate = [*current, sentence]
-        if current and count_tokens(" ".join(candidate)) > target_tokens:
-            chunks.append(" ".join(current))
-            current = _carry_overlap(current, overlap_tokens, count_tokens)
-            candidate = [*current, sentence]
+        size = count_tokens(sentence)
 
-        current = candidate
-
-        if index in breakpoints and count_tokens(" ".join(current)) >= half_budget:
+        if (
+            current
+            and bound + size > target_tokens
+            and count_tokens(" ".join([*current, sentence])) > target_tokens
+        ):
             chunks.append(" ".join(current))
-            current = _carry_overlap(current, overlap_tokens, count_tokens)
+            current, sizes = _carry_overlap(current, sizes, overlap_tokens, count_tokens)
+            bound = sum(sizes)
+
+        current.append(sentence)
+        sizes.append(size)
+        bound += size
+
+        # The bound can only prove the chunk is *under* half budget, which
+        # is the case that skips the call; reaching it still needs the
+        # exact count.
+        if (
+            index in breakpoints
+            and bound >= half_budget
+            and count_tokens(" ".join(current)) >= half_budget
+        ):
+            chunks.append(" ".join(current))
+            current, sizes = _carry_overlap(current, sizes, overlap_tokens, count_tokens)
+            bound = sum(sizes)
 
     if current:
         chunks.append(" ".join(current))
@@ -237,15 +264,30 @@ def _pack(
 
 
 def _carry_overlap(
-    sentences: list[str], overlap_tokens: int, count_tokens: TokenCounter
-) -> list[str]:
-    """Take trailing sentences from a closed chunk to start the next one."""
+    sentences: list[str],
+    sizes: list[int],
+    overlap_tokens: int,
+    count_tokens: TokenCounter,
+) -> tuple[list[str], list[int]]:
+    """Take trailing sentences from a closed chunk to start the next one.
+
+    Returns the carried sentences with their token counts, so the caller
+    does not re-count what has already been measured.
+    """
     if overlap_tokens <= 0:
-        return []
+        return [], []
 
     carried: list[str] = []
-    for sentence in reversed(sentences):
-        if carried and count_tokens(" ".join([sentence, *carried])) > overlap_tokens:
+    carried_sizes: list[int] = []
+    bound = 0
+    for sentence, size in zip(reversed(sentences), reversed(sizes), strict=True):
+        if (
+            carried
+            and bound + size > overlap_tokens
+            and count_tokens(" ".join([sentence, *carried])) > overlap_tokens
+        ):
             break
         carried.insert(0, sentence)
-    return carried
+        carried_sizes.insert(0, size)
+        bound += size
+    return carried, carried_sizes

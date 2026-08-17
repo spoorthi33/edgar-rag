@@ -126,10 +126,17 @@ class ChunkStore:
         )
 
     def text(self, position: int) -> str:
-        """Chunk text, read from disk unless still buffered in memory."""
-        if self._text_path is None:
-            return self._pending_text[position]
-        with self._text_path.open("rb") as handle:
+        """Chunk text, read from disk unless still buffered in memory.
+
+        A store can be both at once: loading an index and appending to it
+        leaves the original chunks on disk and the new ones in memory until
+        the next save. `_offsets` counts the chunks the file actually holds,
+        so it -- not the presence of a file -- decides where a chunk lives.
+        """
+        saved = len(self._offsets)
+        if position >= saved:
+            return self._pending_text[position - saved]
+        with self._text_path.open("rb") as handle:  # type: ignore[union-attr]
             handle.seek(self._offsets[position])
             return json.loads(handle.readline())
 
@@ -150,21 +157,24 @@ class ChunkStore:
         Reads the text file sequentially rather than seeking per chunk,
         which matters when the caller wants all of them.
         """
-        if self._text_path is None:
-            for position in range(len(self)):
-                yield self.chunk(position)
-            return
+        saved = len(self._offsets)
+        if self._text_path is not None:
+            with self._text_path.open() as handle:
+                for position, line in enumerate(handle):
+                    if position >= saved:
+                        break
+                    yield Chunk(
+                        chunk_id=self.chunk_ids[position],
+                        filing_id=self.filing_ids[position],
+                        text=json.loads(line),
+                        metadata=self.metadata(position),
+                        token_count=self._token_counts[position] or None,
+                        order=self._orders[position],
+                    )
 
-        with self._text_path.open() as handle:
-            for position, line in enumerate(handle):
-                yield Chunk(
-                    chunk_id=self.chunk_ids[position],
-                    filing_id=self.filing_ids[position],
-                    text=json.loads(line),
-                    metadata=self.metadata(position),
-                    token_count=self._token_counts[position] or None,
-                    order=self._orders[position],
-                )
+        # Anything appended since the last save is still in memory.
+        for position in range(saved, len(self)):
+            yield self.chunk(position)
 
     def field(self, name: str, position: int) -> str | int:
         """Interned metadata value, without building a `ChunkMetadata`.
@@ -193,11 +203,20 @@ class ChunkStore:
         path.mkdir(parents=True, exist_ok=True)
         text_path = path / TEXT_FILENAME
 
+        # Written to a temporary file and renamed rather than in place. Once
+        # a store has been saved its text lives on disk, so `text()` reads
+        # from exactly the file being written -- opening it "wb" truncates
+        # the source and every chunk saved so far comes back empty. That is
+        # what happens when an existing index is loaded and appended to.
+        # The rename also makes the save atomic: an interruption leaves the
+        # previous text file intact instead of a half-written one.
+        tmp_path = path / (TEXT_FILENAME + ".tmp")
         offsets: list[int] = []
-        with text_path.open("wb") as handle:
+        with tmp_path.open("wb") as handle:
             for position in range(len(self)):
                 offsets.append(handle.tell())
                 handle.write((json.dumps(self.text(position)) + "\n").encode())
+        tmp_path.replace(text_path)
 
         self._offsets = offsets
         self._text_path = text_path

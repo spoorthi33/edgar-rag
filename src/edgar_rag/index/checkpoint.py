@@ -16,8 +16,10 @@ data — worse than rebuilding, because nothing would look wrong.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -32,6 +34,25 @@ MANIFEST_FILENAME = "chunks.checkpoint.json"
 EMBEDDINGS_FILENAME = "embeddings.checkpoint.f32"
 
 
+def filings_digest(filing_ids: Iterable[str]) -> str:
+    """A stable identifier for exactly which filings a checkpoint covers.
+
+    This is deliberately not a count. A count cannot tell "the same filings
+    as before" from "a different set that happens to be the same size", and
+    it forces a full re-chunk whenever the corpus grows: adding a batch of
+    700 filings to 1,800 changes the count, so the checkpoint covering the
+    original 1,800 is discarded and they are all chunked again. Digesting
+    the identifiers makes the checkpoint mean what it should — these
+    filings, chunked this way — so a batch that is interrupted resumes and
+    a batch that completes does not invalidate anything before it.
+    """
+    digest = hashlib.sha256()
+    for filing_id in sorted(filing_ids):
+        digest.update(filing_id.encode())
+        digest.update(b"\x00")
+    return digest.hexdigest()[:32]
+
+
 @dataclass(frozen=True)
 class ChunkFingerprint:
     """The settings a set of chunks depends on.
@@ -41,7 +62,7 @@ class ChunkFingerprint:
     that happen to share a filename.
     """
 
-    filing_count: int
+    filings: str
     splitter: str
     target_tokens: int
     overlap_tokens: int
@@ -58,7 +79,14 @@ class ChunkFingerprint:
 
 
 class ChunkCheckpoint:
-    """Chunks written to disk between the chunking and embedding stages."""
+    """Chunks written to disk between the chunking and embedding stages.
+
+    The checkpoint also records *which* filings it already covers, so
+    chunking can save while it is still running. Saving only on completion
+    made the longest stage of the build the one with no protection: an
+    interruption an hour in threw away that hour, which is the whole thing
+    checkpointing was meant to prevent.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -67,7 +95,17 @@ class ChunkCheckpoint:
     def exists(self) -> bool:
         return (self.path / MANIFEST_FILENAME).is_file() and (self.path / CHUNKS_FILENAME).is_file()
 
-    def save(self, chunks: list[Chunk], fingerprint: ChunkFingerprint) -> None:
+    def save(
+        self,
+        chunks: list[Chunk],
+        fingerprint: ChunkFingerprint,
+        completed: list[str] | None = None,
+    ) -> None:
+        """Write `chunks`, noting the filings in `completed` as done.
+
+        `completed` of None means the checkpoint covers everything the
+        fingerprint describes.
+        """
         self.path.mkdir(parents=True, exist_ok=True)
 
         # Written to a temporary file and renamed, so an interrupted save
@@ -78,17 +116,41 @@ class ChunkCheckpoint:
                 handle.write(chunk.model_dump_json() + "\n")
         tmp.replace(self.path / CHUNKS_FILENAME)
 
-        (self.path / MANIFEST_FILENAME).write_text(json.dumps(asdict(fingerprint), indent=2))
+        # The chunk file is renamed into place before the manifest names it,
+        # so a crash between the two leaves the older, still-consistent
+        # manifest rather than one promising chunks that are not there.
+        payload = {"fingerprint": asdict(fingerprint), "completed": completed}
+        (self.path / MANIFEST_FILENAME).write_text(json.dumps(payload, indent=2))
         logger.info("checkpointed %d chunks to %s", len(chunks), self.path)
 
     def load(self, fingerprint: ChunkFingerprint) -> list[Chunk] | None:
-        """Reusable chunks, or None when the checkpoint does not apply."""
+        """Reusable chunks, or None when the checkpoint is partial or stale."""
+        loaded = self.load_partial(fingerprint)
+        if loaded is None:
+            return None
+        chunks, completed = loaded
+        if completed is not None:
+            # Covers only some of the filings asked for, so the caller must
+            # chunk the rest; it is not a complete answer on its own.
+            return None
+        return chunks
+
+    def load_partial(
+        self, fingerprint: ChunkFingerprint
+    ) -> tuple[list[Chunk], list[str] | None] | None:
+        """Checkpointed chunks and the filings they cover, if reusable.
+
+        The second element is None when the checkpoint is complete, and the
+        list of finished filing ids when chunking stopped part-way.
+        """
         if not self.exists:
             return None
 
         try:
-            saved = ChunkFingerprint(**json.loads((self.path / MANIFEST_FILENAME).read_text()))
-        except (OSError, TypeError, ValueError) as exc:
+            payload = json.loads((self.path / MANIFEST_FILENAME).read_text())
+            saved = ChunkFingerprint(**payload["fingerprint"])
+            completed = payload["completed"]
+        except (OSError, KeyError, TypeError, ValueError) as exc:
             logger.warning("unreadable chunk checkpoint (%s); rebuilding", exc)
             return None
 
@@ -100,8 +162,27 @@ class ChunkCheckpoint:
         with (self.path / CHUNKS_FILENAME).open() as handle:
             chunks = [Chunk.model_validate_json(line) for line in handle if line.strip()]
 
-        logger.info("resuming from %d checkpointed chunks", len(chunks))
-        return chunks
+        if completed is None:
+            logger.info("resuming from %d checkpointed chunks", len(chunks))
+        else:
+            logger.info(
+                "resuming chunking at %d filings (%d chunks already done)",
+                len(completed),
+                len(chunks),
+            )
+        return chunks, completed
+
+    def clear_embeddings(self) -> None:
+        """Drop embeddings only, keeping any chunk progress.
+
+        Called whenever chunks are about to be rebuilt: vectors on disk
+        belong to the previous chunk list, and `EmbeddingCheckpoint` can
+        only reject one that is *longer* than the corpus. A shorter stale
+        checkpoint would be accepted as completed work and its vectors
+        paired with entirely different chunks.
+        """
+        (self.path / EMBEDDINGS_FILENAME).unlink(missing_ok=True)
+        (self.path / (EMBEDDINGS_FILENAME + ".json")).unlink(missing_ok=True)
 
     def clear(self) -> None:
         for name in (

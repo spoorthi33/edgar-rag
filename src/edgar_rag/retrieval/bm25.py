@@ -117,10 +117,22 @@ class BM25Retriever:
         else:
             logger.info("no saved BM25 postings at %s; building from the store", path)
 
-        self._rebuild_from(store)
+        self.rebuild_from(store)
 
-    def _rebuild_from(self, store: ChunkStore) -> None:
-        """Tokenize the corpus and build postings, streaming a chunk at a time."""
+    def rebuild_from(self, store: ChunkStore) -> None:
+        """Rebuild every statistic from an entire chunk store.
+
+        Used both when saved postings are unusable and after chunks are
+        appended to the index: document frequencies are corpus-wide, so new
+        documents change the scores of the old ones and the postings cannot
+        simply be extended.
+        """
+        self._store = store
+        # Rebuilt rather than added to, so calling this twice cannot
+        # double-register a chunk under its metadata.
+        self._filters = MetadataFilterIndex()
+        self._filters.add_from_store(store)
+
         # Streamed a chunk at a time: the tokenized corpus is the largest
         # single allocation in this class and never needs to exist whole.
         postings = BM25Postings()

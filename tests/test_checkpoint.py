@@ -16,13 +16,14 @@ from edgar_rag.index.checkpoint import (
     ChunkCheckpoint,
     ChunkFingerprint,
     EmbeddingCheckpoint,
+    filings_digest,
 )
 from edgar_rag.models import Chunk, ChunkMetadata, FormType
 
 
 def _fingerprint(**overrides) -> ChunkFingerprint:
     defaults = dict(
-        filing_count=20,
+        filings=filings_digest(["a", "b"]),
         splitter="SemanticSplitter",
         target_tokens=512,
         overlap_tokens=64,
@@ -86,7 +87,7 @@ def test_no_checkpoint_returns_none(tmp_path) -> None:
         {"overlap_tokens": 0},
         {"breakpoint_percentile": 80},
         {"embedding_model": "some/other-model"},
-        {"filing_count": 21},
+        {"filings": filings_digest(["a", "b", "c"])},
     ],
 )
 def test_checkpoint_is_rejected_when_the_build_changed(tmp_path, changed: dict) -> None:
@@ -113,6 +114,90 @@ def test_clear_removes_the_checkpoint(tmp_path) -> None:
 
     assert not checkpoint.exists
     assert checkpoint.load(_fingerprint()) is None
+
+
+# --- Partial chunking ----------------------------------------------------
+
+
+def test_a_partial_checkpoint_is_not_mistaken_for_a_complete_one(tmp_path) -> None:
+    """`load` answers "is this the whole job", and a partial one is not.
+
+    Returning partial chunks here would index a fraction of the batch and
+    then clear the checkpoint, silently dropping the rest.
+    """
+    checkpoint = ChunkCheckpoint(tmp_path)
+    checkpoint.save(_chunks(3), _fingerprint(), completed=["a"])
+
+    assert checkpoint.load(_fingerprint()) is None
+
+
+def test_partial_progress_reports_which_filings_are_done(tmp_path) -> None:
+    """Chunking saves as it runs, so an interruption costs minutes."""
+    checkpoint = ChunkCheckpoint(tmp_path)
+    checkpoint.save(_chunks(3), _fingerprint(), completed=["a"])
+
+    loaded = checkpoint.load_partial(_fingerprint())
+
+    assert loaded is not None
+    chunks, completed = loaded
+    assert len(chunks) == 3
+    assert completed == ["a"]
+
+
+def test_a_completed_checkpoint_reports_no_outstanding_filings(tmp_path) -> None:
+    checkpoint = ChunkCheckpoint(tmp_path)
+    checkpoint.save(_chunks(3), _fingerprint())
+
+    loaded = checkpoint.load_partial(_fingerprint())
+
+    assert loaded is not None
+    assert loaded[1] is None
+
+
+def test_partial_progress_is_discarded_when_the_batch_changes(tmp_path) -> None:
+    """Resuming one batch's partial work into another would mix corpora."""
+    checkpoint = ChunkCheckpoint(tmp_path)
+    checkpoint.save(_chunks(3), _fingerprint(), completed=["a"])
+
+    other = _fingerprint(filings=filings_digest(["x", "y"]))
+    assert checkpoint.load_partial(other) is None
+
+
+def test_clearing_embeddings_keeps_chunk_progress(tmp_path) -> None:
+    """Re-chunking must invalidate vectors without discarding chunk work.
+
+    An embedding checkpoint shorter than the new chunk list is accepted as
+    finished work, so its vectors would be paired with different chunks.
+    """
+    checkpoint = ChunkCheckpoint(tmp_path)
+    checkpoint.save(_chunks(3), _fingerprint(), completed=["a"])
+    EmbeddingCheckpoint(tmp_path, 3, 4).append(np.ones((2, 4), dtype=np.float32))
+
+    checkpoint.clear_embeddings()
+
+    assert EmbeddingCheckpoint(tmp_path, 3, 4).load() is None
+    assert checkpoint.load_partial(_fingerprint()) is not None
+
+
+# --- Filing digests ------------------------------------------------------
+
+
+def test_digest_ignores_ordering(tmp_path) -> None:
+    assert filings_digest(["b", "a"]) == filings_digest(["a", "b"])
+
+
+def test_digest_separates_sets_of_the_same_size(tmp_path) -> None:
+    """A count could not: this is why the fingerprint stopped using one.
+
+    Two different batches of equal size sharing a fingerprint would let one
+    batch's chunks be reused as the other's.
+    """
+    assert filings_digest(["a", "b"]) != filings_digest(["a", "c"])
+
+
+def test_digest_is_not_confused_by_delimiters(tmp_path) -> None:
+    """Concatenation alone would make ["ab","c"] and ["a","bc"] identical."""
+    assert filings_digest(["ab", "c"]) != filings_digest(["a", "bc"])
 
 
 # --- Embedding checkpoint ------------------------------------------------

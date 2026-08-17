@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Collection, Iterable
 
 import numpy as np
 
@@ -23,6 +24,7 @@ from edgar_rag.index.checkpoint import (
     ChunkCheckpoint,
     ChunkFingerprint,
     EmbeddingCheckpoint,
+    filings_digest,
 )
 from edgar_rag.index.faiss_index import FaissIndex
 from edgar_rag.ingest.manifest import Manifest
@@ -38,11 +40,21 @@ logger = logging.getLogger(__name__)
 CHUNK_LOG_EVERY = 50
 EMBED_BATCH = 2_000
 
+# Chunk checkpointing rewrites the whole chunk file, so it is deliberately
+# rarer than logging: at ~0.3 filings/s this saves roughly every ten minutes,
+# which bounds what an interruption costs without making the writes
+# themselves significant. Saving every 50 filings instead would rewrite a
+# growing 250 MB file eighteen times a batch — the same quadratic trap that
+# made embedding checkpoints cost more than embedding.
+CHUNK_CHECKPOINT_EVERY = 200
 
-def _fingerprint(settings: Settings, splitter: Splitter, filing_count: int) -> ChunkFingerprint:
+
+def _fingerprint(
+    settings: Settings, splitter: Splitter, filing_ids: Iterable[str]
+) -> ChunkFingerprint:
     """What a set of chunks depends on, so an inapplicable one is rejected."""
     return ChunkFingerprint(
-        filing_count=filing_count,
+        filings=filings_digest(filing_ids),
         splitter=type(splitter).__name__,
         target_tokens=getattr(splitter, "target_tokens", 0),
         overlap_tokens=getattr(splitter, "overlap_tokens", 0),
@@ -56,8 +68,13 @@ def build_chunks(
     splitter: Splitter | None = None,
     tickers: list[str] | None = None,
     use_checkpoint: bool = True,
+    filing_ids: Collection[str] | None = None,
 ) -> list[Chunk]:
-    """Parse and chunk every stored filing, resuming from a checkpoint."""
+    """Parse and chunk stored filings, resuming from a checkpoint.
+
+    `filing_ids` restricts the run to specific filings, so a growing corpus
+    can be chunked one batch at a time instead of from scratch.
+    """
     settings = settings or get_settings()
     splitter = splitter or SemanticSplitter(
         embedder=SentenceTransformerEmbedder(settings=settings),
@@ -69,30 +86,47 @@ def build_chunks(
 
     # The checkpoint is consulted before parsing, not after: when it applies
     # there is nothing to parse, and re-parsing 1,800 filings to discover
-    # that would cost a quarter of an hour for no reason. The filing count
-    # therefore comes from the manifest rather than the parse result.
+    # that would cost a quarter of an hour for no reason. The filings it
+    # covers therefore come from the manifest rather than the parse result.
     wanted = {t.upper() for t in tickers} if tickers else None
-    filing_count = sum(
-        1
+    selected = set(filing_ids) if filing_ids is not None else None
+    covered = [
+        filing.filing_id
         for filing in manifest.filings.values()
-        if not wanted or (filing.ticker or "").upper() in wanted
-    )
+        if (selected is None or filing.filing_id in selected)
+        and (not wanted or (filing.ticker or "").upper() in wanted)
+    ]
 
     checkpoint = ChunkCheckpoint(settings.index_path)
-    fingerprint = _fingerprint(settings, splitter, filing_count)
+    fingerprint = _fingerprint(settings, splitter, covered)
 
-    if use_checkpoint:
-        saved = checkpoint.load(fingerprint)
-        if saved is not None:
-            return saved
-
-    parsed = parse_all(settings=settings, tickers=tickers)
     chunks: list[Chunk] = []
+    done: list[str] = []
+    if use_checkpoint:
+        loaded = checkpoint.load_partial(fingerprint)
+        if loaded is not None:
+            chunks, completed = loaded
+            if completed is None:
+                return chunks
+            done = completed
+
+    # Any embeddings on disk describe the previous chunk list. Left in
+    # place they would be reused as a prefix of this one, silently pairing
+    # the wrong vectors with the wrong chunks.
+    if use_checkpoint:
+        checkpoint.clear_embeddings()
+
+    # Filings already chunked are neither parsed nor re-chunked; parsing
+    # alone runs to about half a second each.
+    finished = set(done)
+    remaining = [f for f in covered if f not in finished]
+    parsed = parse_all(settings=settings, tickers=tickers, filing_ids=remaining)
     started = time.perf_counter()
     total = len(parsed)
 
     for index, (filing_id, sections) in enumerate(parsed.items(), start=1):
         chunks.extend(chunk_filing(manifest.filings[filing_id], sections, splitter))
+        done.append(filing_id)
 
         if index % CHUNK_LOG_EVERY == 0 or index == total:
             elapsed = time.perf_counter() - started
@@ -105,6 +139,11 @@ def build_chunks(
                 rate,
                 ((total - index) / rate / 60) if rate else 0,
             )
+
+        if use_checkpoint and index % CHUNK_CHECKPOINT_EVERY == 0 and index < total:
+            # Saved while still running, so an interruption costs the
+            # minutes since the last save rather than the whole stage.
+            checkpoint.save(chunks, fingerprint, completed=done)
 
     if use_checkpoint:
         checkpoint.save(chunks, fingerprint)
@@ -161,8 +200,15 @@ def build_index(
     chunks: list[Chunk] | None = None,
     tickers: list[str] | None = None,
     use_checkpoint: bool = True,
+    filing_ids: Collection[str] | None = None,
+    append: bool = False,
 ) -> FaissIndex:
-    """Chunk, embed and index the corpus, then persist it."""
+    """Chunk, embed and index the corpus, then persist it.
+
+    With `append`, the existing index is loaded and the new chunks are added
+    to it rather than replacing it. That is what lets the corpus grow in
+    sessions of a couple of hours instead of one very long run.
+    """
     settings = settings or get_settings()
     embedder = embedder or SentenceTransformerEmbedder(settings=settings)
 
@@ -177,6 +223,7 @@ def build_index(
             splitter=splitter,
             tickers=tickers,
             use_checkpoint=use_checkpoint,
+            filing_ids=filing_ids,
         )
 
     if not chunks:
@@ -185,18 +232,33 @@ def build_index(
     logger.info("embedding %d chunks with %s", len(chunks), embedder.model_name)
     vectors = _embed_with_checkpoint(chunks, embedder, settings, use_checkpoint)
 
-    index = FaissIndex(
-        dimension=embedder.dimension,
-        index_type=settings.faiss_index_type,
-        nlist=settings.faiss_ivf_nlist,
-        model_name=embedder.model_name,
-    )
+    if append:
+        index = load_index(settings=settings, embedder=embedder)
+        logger.info("appending %d chunks to an index of %d", len(chunks), index.size)
+    else:
+        index = FaissIndex(
+            dimension=embedder.dimension,
+            index_type=settings.faiss_index_type,
+            nlist=settings.faiss_ivf_nlist,
+            model_name=embedder.model_name,
+        )
     index.add(chunks, vectors)
     index.save(settings.index_path)
 
     # The sparse index is persisted alongside so query processes do not pay
     # to re-tokenize the corpus before their first search.
-    BM25Retriever(chunks).save(settings.index_path)
+    #
+    # BM25 scores against corpus-wide document frequencies, so an append
+    # cannot append here too: every term's statistics shift when documents
+    # arrive, and the postings are rebuilt over the whole store. It streams
+    # from the store a chunk at a time and costs well under a minute, which
+    # is small next to the hours of chunking a batch represents.
+    sparse = BM25Retriever()
+    if append:
+        sparse.rebuild_from(index.store)
+    else:
+        sparse.add(chunks)
+    sparse.save(settings.index_path)
 
     if use_checkpoint:
         # The index is written, so the checkpoints have served their purpose

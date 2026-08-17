@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 
 from edgar_rag.config import Settings, get_settings
 from edgar_rag.ingest.manifest import Manifest
@@ -56,8 +57,13 @@ def parse_all(
     settings: Settings | None = None,
     store: ObjectStore | None = None,
     tickers: list[str] | None = None,
+    filing_ids: Collection[str] | None = None,
 ) -> dict[str, list[Section]]:
     """Parse filings from the manifest. Returns sections by filing_id.
+
+    `filing_ids` narrows the run to specific filings, which is what lets the
+    corpus grow in batches: re-parsing every filing already indexed would
+    cost more than parsing the new ones.
 
     A filing whose raw document is missing is logged and skipped rather than
     aborting the run, matching the ingestion pipeline's behaviour.
@@ -66,9 +72,12 @@ def parse_all(
     store = store or get_object_store(settings)
     manifest = Manifest.load(settings.local_storage_path / "manifest.json")
     wanted = {t.upper() for t in tickers} if tickers else None
+    selected = set(filing_ids) if filing_ids is not None else None
 
     results: dict[str, list[Section]] = {}
     for filing in manifest.filings.values():
+        if selected is not None and filing.filing_id not in selected:
+            continue
         if wanted and (filing.ticker or "").upper() not in wanted:
             continue
         if not filing.storage_key:
